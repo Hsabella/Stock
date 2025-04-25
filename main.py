@@ -165,11 +165,32 @@ class StockScanner:
                 logger.warning("无法获取指数数据，无法判断市场状态")
                 return
 
+            # 检查数据有效性
+            if "close" not in index_data.columns:
+                logger.warning("指数数据中缺少close列，无法判断市场状态")
+                return self.market_status
+
             # 计算指标
-            index_data = BasicIndicator.add_ma(
-                index_data, short=20, mid=60, long=120)
+            try:
+                index_data = BasicIndicator.add_ma(
+                    index_data, short=20, mid=60, long=120)
+            except Exception as e:
+                logger.error(f"计算指数指标失败: {str(e)}")
+                return self.market_status
 
             # 获取最新数据
+            if index_data.empty:
+                logger.warning("计算指标后的指数数据为空，无法判断市场状态")
+                return self.market_status
+
+            # 确保必要的列存在
+            required_cols = ["MA_20", "MA_60", "MA_120"]
+            missing_cols = [
+                col for col in required_cols if col not in index_data.columns]
+            if missing_cols:
+                logger.warning(f"指数数据缺少必要列: {missing_cols}，无法判断市场状态")
+                return self.market_status
+
             latest = index_data.iloc[-1]
 
             # 简单判断市场状态规则：
@@ -198,6 +219,7 @@ class StockScanner:
 
         except Exception as e:
             logger.error(f"判断市场状态出错: {str(e)}")
+            logger.debug(traceback.format_exc())
             return self.market_status
 
     def scan_stocks(self):
@@ -216,6 +238,13 @@ class StockScanner:
                 logger.error("获取股票列表失败")
                 return
 
+            # 过滤无效的股票代码
+            stocks = stocks.dropna(subset=["symbol", "name"])
+            # 确保symbol是字符串类型
+            stocks["symbol"] = stocks["symbol"].astype(str)
+            # 移除symbol列中的空字符串
+            stocks = stocks[stocks["symbol"].str.strip() != ""]
+
             total_stocks = len(stocks)
             logger.info(f"共获取到{total_stocks}只股票")
 
@@ -226,67 +255,90 @@ class StockScanner:
 
             # 每种策略的结果
             all_results = []
+            success_count = 0
+            error_count = 0
+            last_progress_report = time.time()
 
             # 逐个扫描股票
             for i, (_, stock) in enumerate(stocks.iterrows()):
                 symbol = stock["symbol"]
                 name = stock["name"]
 
-                # 获取K线数据
-                data = data_fetcher.get_k_data(symbol, period="daily")
-                if data.empty:
-                    logger.warning(f"获取 {symbol}({name}) K线数据失败，跳过")
-                    continue
-
-                # 计算基础指标
-                data = BasicIndicator.calculate_all(data)
-
-                # 应用各个策略
-                stock_results = []
-
-                for strategy_id, strategy in self.strategies.items():
-                    if not strategy.is_enabled:
+                try:
+                    # 获取K线数据
+                    data = data_fetcher.get_k_data(symbol, period="daily")
+                    if data.empty:
+                        logger.warning(f"获取 {symbol}({name}) K线数据失败，跳过")
+                        error_count += 1
                         continue
 
-                    try:
-                        # 执行策略扫描
-                        strategy_result = strategy.scan(data)
+                    # 计算基础指标
+                    data = BasicIndicator.calculate_all(data)
 
-                        # 如果最新数据有买入信号
-                        latest = strategy_result.iloc[-1]
-                        if latest["signal"] > 0:
-                            # 记录结果
-                            result = {
-                                "symbol": symbol,
-                                "name": name,
-                                "strategy": strategy_id,
-                                "score": latest["score"],
-                                "weight": strategy.weight,
-                                "weighted_score": latest["score"] * strategy.weight,
-                                "date": latest.name,
-                                "price": latest["close"],
-                                "signal": latest["signal"],
-                                "indicator_values": {
-                                    "MACD": latest.get("MACD", None),
-                                    "MACD_diff": latest.get("MACD_diff", None),
-                                    f"RSI_{strategy.params.get('rsi_length', 24)}": latest.get(f"RSI_{strategy.params.get('rsi_length', 24)}", None)
-                                }
-                            }
-                            stock_results.append(result)
+                    # 应用各个策略
+                    stock_results = []
 
-                    except Exception as e:
-                        logger.error(
-                            f"执行策略 {strategy_id} 扫描 {symbol}({name}) 出错: {str(e)}")
-                        logger.debug(traceback.format_exc())
+                    for strategy_id, strategy in self.strategies.items():
+                        if not strategy.is_enabled:
+                            continue
 
-                # 如果有策略发现了信号
-                if stock_results:
-                    all_results.extend(stock_results)
+                        try:
+                            # 执行策略扫描
+                            strategy_result = strategy.scan(data)
 
-                # 进度报告
-                if (i + 1) % 100 == 0 or (i + 1) == len(stocks):
+                            # 如果最新数据有买入信号
+                            if not strategy_result.empty:
+                                latest = strategy_result.iloc[-1]
+                                if latest["signal"] > 0:
+                                    # 记录结果
+                                    result = {
+                                        "symbol": symbol,
+                                        "name": name,
+                                        "strategy": strategy_id,
+                                        "score": latest["score"],
+                                        "weight": strategy.weight,
+                                        "weighted_score": latest["score"] * strategy.weight,
+                                        "date": latest.name,
+                                        "price": latest["close"],
+                                        "signal": latest["signal"],
+                                        "indicator_values": {
+                                            "MACD": latest.get("MACD", None),
+                                            "MACD_diff": latest.get("MACD_diff", None),
+                                            f"RSI_{strategy.params.get('rsi_length', 24)}": latest.get(f"RSI_{strategy.params.get('rsi_length', 24)}", None)
+                                        }
+                                    }
+                                    stock_results.append(result)
+
+                        except Exception as e:
+                            logger.error(
+                                f"执行策略 {strategy_id} 扫描 {symbol}({name}) 出错: {str(e)}")
+                            logger.debug(traceback.format_exc())
+
+                    # 如果有策略发现了信号
+                    if stock_results:
+                        all_results.extend(stock_results)
+
+                    success_count += 1
+
+                except Exception as e:
+                    logger.error(f"处理 {symbol}({name}) 过程出错: {str(e)}")
+                    logger.debug(traceback.format_exc())
+                    error_count += 1
+                    continue
+
+                # API调用频率限制，避免被封
+                if (i + 1) % 5 == 0:
+                    time.sleep(0.5)  # 每5只股票暂停0.5秒
+
+                # 每5秒或每100只股票报告一次进度
+                if (i + 1) % 100 == 0 or (time.time() - last_progress_report) > 5:
+                    last_progress_report = time.time()
                     logger.info(
-                        f"已扫描 {i+1}/{len(stocks)} 只股票，发现 {len(all_results)} 个信号")
+                        f"已扫描 {i+1}/{len(stocks)} 只股票 ({(i+1)/len(stocks)*100:.1f}%)，成功: {success_count}，失败: {error_count}，发现 {len(all_results)} 个信号")
+
+            # 最终进度报告
+            logger.info(
+                f"扫描完成，共扫描 {len(stocks)} 只股票，成功: {success_count}，失败: {error_count}，发现 {len(all_results)} 个信号")
 
             # 处理结果
             if all_results:

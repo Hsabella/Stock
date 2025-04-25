@@ -32,6 +32,14 @@ class BasicIndicator:
             logger.warning("输入数据为空，无法计算指标")
             return df
 
+        # 检查必要的列是否存在
+        required_cols = ["close"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            logger.error(f"数据缺少必要列: {missing_cols}, 无法计算指标")
+            logger.debug(f"可用列: {df.columns.tolist()}")
+            return df
+
         # 复制数据，避免修改原始数据
         result_df = df.copy()
 
@@ -39,28 +47,45 @@ class BasicIndicator:
         indicators = indicators or DEFAULT_INDICATORS
 
         # 计算各类指标
-        if "MACD" in indicators:
-            result_df = BasicIndicator.add_macd(
-                result_df, **indicators["MACD"])
+        try:
+            if "MACD" in indicators:
+                result_df = BasicIndicator.add_macd(
+                    result_df, **indicators["MACD"])
 
-        if "RSI" in indicators:
-            result_df = BasicIndicator.add_rsi(result_df, **indicators["RSI"])
+            if "RSI" in indicators:
+                result_df = BasicIndicator.add_rsi(
+                    result_df, **indicators["RSI"])
 
-        if "MA" in indicators:
-            result_df = BasicIndicator.add_ma(result_df, **indicators["MA"])
+            if "MA" in indicators:
+                result_df = BasicIndicator.add_ma(
+                    result_df, **indicators["MA"])
 
-        if "VOLUME" in indicators:
-            result_df = BasicIndicator.add_volume_indicators(
-                result_df, **indicators["VOLUME"])
+            if "VOLUME" in indicators:
+                # 检查volume列是否存在
+                if "volume" in result_df.columns:
+                    result_df = BasicIndicator.add_volume_indicators(
+                        result_df, **indicators["VOLUME"])
+                else:
+                    logger.warning("数据中缺少volume列，跳过计算成交量指标")
 
-        if "BOLL" in indicators:
-            result_df = BasicIndicator.add_bollinger(
-                result_df, **indicators["BOLL"])
+            if "BOLL" in indicators:
+                result_df = BasicIndicator.add_bollinger(
+                    result_df, **indicators["BOLL"])
 
-        if "KDJ" in indicators:
-            result_df = BasicIndicator.add_kdj(result_df, **indicators["KDJ"])
+            if "KDJ" in indicators:
+                # 检查高低价列是否存在
+                if "high" in result_df.columns and "low" in result_df.columns:
+                    result_df = BasicIndicator.add_kdj(
+                        result_df, **indicators["KDJ"])
+                else:
+                    logger.warning("数据中缺少high/low列，跳过计算KDJ指标")
 
-        return result_df
+            return result_df
+        except Exception as e:
+            logger.error(f"计算指标时发生错误: {str(e)}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return df
 
     @staticmethod
     def add_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26,
@@ -185,31 +210,35 @@ class BasicIndicator:
 
             # 判断短中均线交叉
             result_df["MA_short_cross_mid"] = (
-                (result_df[f"MA_{short}"].shift(1) < result_df[f"MA_{mid}"].shift(1)) &
-                (result_df[f"MA_{short}"] > result_df[f"MA_{mid}"])
+                (result_df[f"MA_{short}"].shift(1).fillna(0) < result_df[f"MA_{mid}"].shift(1).fillna(0)) &
+                (result_df[f"MA_{short}"].fillna(0)
+                 > result_df[f"MA_{mid}"].fillna(0))
             )
             result_df["MA_short_dead_cross_mid"] = (
-                (result_df[f"MA_{short}"].shift(1) > result_df[f"MA_{mid}"].shift(1)) &
-                (result_df[f"MA_{short}"] < result_df[f"MA_{mid}"])
+                (result_df[f"MA_{short}"].shift(1).fillna(0) > result_df[f"MA_{mid}"].shift(1).fillna(0)) &
+                (result_df[f"MA_{short}"].fillna(0)
+                 < result_df[f"MA_{mid}"].fillna(0))
             )
 
             # 判断中长均线交叉
             result_df["MA_mid_cross_long"] = (
-                (result_df[f"MA_{mid}"].shift(1) < result_df[f"MA_{long}"].shift(1)) &
-                (result_df[f"MA_{mid}"] > result_df[f"MA_{long}"])
+                (result_df[f"MA_{mid}"].shift(1).fillna(0) < result_df[f"MA_{long}"].shift(1).fillna(0)) &
+                (result_df[f"MA_{mid}"].fillna(0) >
+                 result_df[f"MA_{long}"].fillna(0))
             )
             result_df["MA_mid_dead_cross_long"] = (
-                (result_df[f"MA_{mid}"].shift(1) > result_df[f"MA_{long}"].shift(1)) &
-                (result_df[f"MA_{mid}"] < result_df[f"MA_{long}"])
+                (result_df[f"MA_{mid}"].shift(1).fillna(0) > result_df[f"MA_{long}"].shift(1).fillna(0)) &
+                (result_df[f"MA_{mid}"].fillna(0) <
+                 result_df[f"MA_{long}"].fillna(0))
             )
 
             # 判断价格与均线关系
             result_df["price_above_short_ma"] = result_df[
-                column] > result_df[f"MA_{short}"]
+                column] > result_df[f"MA_{short}"].fillna(0)
             result_df["price_above_mid_ma"] = result_df[
-                column] > result_df[f"MA_{mid}"]
+                column] > result_df[f"MA_{mid}"].fillna(0)
             result_df["price_above_long_ma"] = result_df[
-                column] > result_df[f"MA_{long}"]
+                column] > result_df[f"MA_{long}"].fillna(0)
 
             return result_df
 
