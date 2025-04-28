@@ -77,7 +77,7 @@ class MacdRsiStrategy(StrategyBase):
             return pd.DataFrame()
 
         # 确保数据包含必要的指标，如果没有则计算
-        if "MACD" not in data.columns or f"RSI_{self.params.get('rsi_length', 24)}" not in data.columns:
+        if "MACD_LINE" not in data.columns or "RSI" not in data.columns:
             logger.debug("数据中缺少必要的指标，正在计算...")
             data = self._ensure_indicators(data)
 
@@ -119,15 +119,19 @@ class MacdRsiStrategy(StrategyBase):
 
         # 条件1: MACD金叉
         if self.conditions.get("macd_crossover", True):
-            conditions["macd_crossover"] = result["MACD_golden_cross"]
+            conditions["macd_crossover"] = result["MACD_GOLDEN_CROSS"]
 
         # 条件2: MACD零线金叉
         if self.conditions.get("macd_zero_crossover", True):
-            conditions["macd_zero_crossover"] = result["MACD_zero_golden_cross"]
+            conditions["macd_zero_crossover"] = (
+                (result["MACD_LINE"].shift(1).fillna(0) <= 0) &
+                (result["MACD_LINE"].fillna(0) > 0)
+            )
 
         # 条件3: RSI超卖
         if self.conditions.get("rsi_oversold", True):
-            conditions[f"rsi_{rsi_length}_oversold"] = result[f"RSI_{rsi_length}"] < rsi_oversold
+            conditions[f"rsi_{rsi_length}_oversold"] = result["RSI"].fillna(
+                0) < rsi_oversold
 
         # 条件4: 价格位于均线之上（可选）
         if self.conditions.get("price_above_ma", False):
@@ -137,8 +141,11 @@ class MacdRsiStrategy(StrategyBase):
 
         # 条件5: RSI向上拐头（额外条件）
         if self.conditions.get("rsi_turning_up", False):
-            conditions["rsi_turning_up"] = result.get(
-                f"RSI_{rsi_length}_rising", pd.Series(False, index=result.index))
+            conditions["rsi_turning_up"] = (
+                (result["RSI"].shift(1).fillna(0) < result["RSI"].fillna(0)) &
+                (result["RSI"].shift(2).fillna(0) >
+                 result["RSI"].shift(1).fillna(0))
+            )
 
         # 将条件结果添加到DataFrame
         for name, condition in conditions.items():
@@ -166,61 +173,92 @@ class MacdRsiStrategy(StrategyBase):
         return result
 
     def calculate_score(self, data: pd.DataFrame) -> pd.Series:
-        """计算策略得分
+        """计算每个交易日的策略得分，用于评估买入时机的优劣
 
         Args:
-            data: DataFrame，应包含生成的信号
+            data: 包含技术指标的DataFrame
 
         Returns:
-            pd.Series: 策略得分（0-100）
+            pd.Series: 0-100的得分，分数越高代表买入信号越强
         """
-        # 初始化得分
-        score = pd.Series(0, index=data.index)
-
-        # 提取参数
+        # 获取参数
+        macd_fast = self.params.get("macd_fast", 6)
+        macd_slow = self.params.get("macd_slow", 12)
+        macd_signal = self.params.get("macd_signal", 5)
         rsi_length = self.params.get("rsi_length", 24)
         rsi_oversold = self.params.get("rsi_oversold", 30)
 
-        # 1. 条件满足基础分: 60分
-        mask_conditions_met = data.get(
-            "conditions_met", pd.Series(False, index=data.index))
-        score.loc[mask_conditions_met] += 60
+        # 初始化得分为0
+        score = pd.Series(0, index=data.index)
 
-        # 2. MACD金叉强度: 0-15分
-        if "MACD_diff" in data.columns:
-            # MACD金叉当天的差值，越大得分越高
-            macd_cross_value = data.loc[data.get(
-                "MACD_golden_cross", False), "MACD_diff"]
-            if not macd_cross_value.empty:
-                # 标准化到0-15分
-                normalized = (macd_cross_value /
-                              macd_cross_value.abs().max() * 15).clip(0, 15)
-                score.loc[normalized.index] += normalized
+        # 1. MACD金叉： 有金叉加10分
+        if "MACD_GOLDEN_CROSS" in data.columns:
+            score.loc[data["MACD_GOLDEN_CROSS"]] += 10
+
+        # 2. MACD零线以上： 10分
+        if "MACD_LINE" in data.columns:
+            # MACD值为正数，加分
+            score.loc[data["MACD_LINE"].fillna(0) > 0] += 10
+
+            # 计算MACD上穿零线的强度
+            zero_cross = (data["MACD_LINE"].shift(1).fillna(
+                0) <= 0) & (data["MACD_LINE"].fillna(0) > 0)
+
+            if zero_cross.any():
+                # 找到MACD零线金叉的位置
+                zero_cross_idx = data.index[zero_cross]
+
+                # 计算零线金叉的强度（MACD值的绝对值）
+                if not zero_cross_idx.empty:
+                    macd_cross_value = data.loc[zero_cross_idx, "MACD_LINE"].abs(
+                    )
+
+                    # 标准化到0-15分，确保数值有效且处理NA值
+                    if not macd_cross_value.empty and macd_cross_value.abs().max() > 0:
+                        max_value = macd_cross_value.abs().max()
+                        normalized = (macd_cross_value /
+                                      max_value * 15).fillna(0).clip(0, 15)
+
+                        # 安全地将浮点值转换为整数
+                        for idx in normalized.index:
+                            if idx in score.index:
+                                score.loc[idx] = score.loc[idx] + \
+                                    normalized.loc[idx]
 
         # 3. RSI超卖程度: 0-15分
-        if f"RSI_{rsi_length}" in data.columns:
+        if "RSI" in data.columns:
             # RSI值越低，分数越高（但不包括极端异常值）
-            rsi_values = data[f"RSI_{rsi_length}"]
-            # 只考虑低于超卖阈值的部分
-            rsi_oversold_score = (
-                (rsi_oversold - rsi_values) / rsi_oversold * 15).clip(0, 15)
-            score += rsi_oversold_score
+            rsi_values = data["RSI"].fillna(50)  # 使用中性值填充空值
+
+            # 只考虑低于超卖阈值的部分，计算分数
+            oversold_mask = rsi_values < rsi_oversold
+            if oversold_mask.any():
+                # 只对超卖的数据计算分数
+                rsi_oversold_values = rsi_values[oversold_mask]
+                rsi_oversold_score = (
+                    (rsi_oversold - rsi_oversold_values) / rsi_oversold * 15).clip(0, 15)
+
+                # 安全地将分数加到score上
+                for idx in rsi_oversold_score.index:
+                    if idx in score.index:
+                        score.loc[idx] = score.loc[idx] + \
+                            rsi_oversold_score.loc[idx]
 
         # 4. 成交量确认: 0-10分
         if "VOLUME_EXPAND" in data.columns:
             # 成交量放大，加分
-            score.loc[data["VOLUME_EXPAND"]] += 5
+            score.loc[data["VOLUME_EXPAND"].fillna(False)] += 5
             if "VOLUME_MILD_EXPAND" in data.columns:
                 # 温和放量，额外加分
-                score.loc[data["VOLUME_MILD_EXPAND"]] += 5
+                score.loc[data["VOLUME_MILD_EXPAND"].fillna(False)] += 5
 
         # 5. 价格位置确认: 0-10分（距离支撑位置远近）
-        if "PRICE_BELOW_BOLL_LOWER" in data.columns:
+        if "BB_LOWER_TOUCH" in data.columns:
             # 价格低于布林下轨，可能超跌
-            score.loc[data["PRICE_BELOW_BOLL_LOWER"]] += 10
+            score.loc[data["BB_LOWER_TOUCH"].fillna(False)] += 10
 
-        # 四舍五入到整数
-        return score.round().astype(int).clip(0, 100)
+        # 确保分数是浮点数，然后四舍五入到整数
+        return score.astype(float).round().astype('Int64').clip(0, 100)
 
     def _ensure_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
         """确保数据包含必要的技术指标
@@ -233,14 +271,14 @@ class MacdRsiStrategy(StrategyBase):
         """
         # 提取MACD参数
         macd_params = {
-            "fast": self.params.get("macd_fast", 6),
-            "slow": self.params.get("macd_slow", 12),
-            "signal": self.params.get("macd_signal", 5)
+            "fast_period": self.params.get("macd_fast", 6),
+            "slow_period": self.params.get("macd_slow", 12),
+            "signal_period": self.params.get("macd_signal", 5)
         }
 
         # 提取RSI参数
         rsi_params = {
-            "length": self.params.get("rsi_length", 24),
+            "period": self.params.get("rsi_length", 24),
             "overbought": self.params.get("rsi_overbought", 70),
             "oversold": self.params.get("rsi_oversold", 30)
         }
@@ -251,11 +289,63 @@ class MacdRsiStrategy(StrategyBase):
             "RSI": rsi_params,
             "MA": {"short": 5, "mid": 20, "long": 60},
             "VOLUME": {"short": 5, "long": 20},
-            "BOLL": {"length": 20, "std": 2.0}
+            "BOLL": {"window": 20, "std_dev": 2.0}
         }
 
         # 计算指标
         return BasicIndicator.calculate_all(data, indicators_config)
+
+    def _calculate_score(self, row: pd.Series) -> float:
+        """计算每一行的综合评分
+
+        Args:
+            row: DataFrame的一行
+
+        Returns:
+            float: 信号强度评分 (0.0-1.0)
+        """
+        score = 0.0
+        total_weight = 0
+
+        # MACD金叉
+        if self.conditions.get("macd_crossover", True):
+            weight = self.weights.get("macd_crossover", 10)
+            if row.get("condition_macd_crossover", False):
+                score += weight
+            total_weight += weight
+
+        # MACD零线金叉
+        if self.conditions.get("macd_zero_crossover", True):
+            weight = self.weights.get("macd_zero_crossover", 5)
+            if row.get("condition_macd_zero_crossover", False):
+                score += weight
+            total_weight += weight
+
+        # RSI超卖
+        rsi_length = self.params.get("rsi_length", 24)
+        if self.conditions.get("rsi_oversold", True):
+            weight = self.weights.get("rsi_oversold", 8)
+            if row.get(f"condition_rsi_{rsi_length}_oversold", False):
+                score += weight
+            total_weight += weight
+
+        # 价格位于均线之上
+        if self.conditions.get("price_above_ma", False):
+            weight = self.weights.get("price_above_ma", 4)
+            if row.get("condition_price_above_ma", False):
+                score += weight
+            total_weight += weight
+
+        # RSI向上拐头
+        if self.conditions.get("rsi_turning_up", False):
+            weight = self.weights.get("rsi_turning_up", 6)
+            if row.get("condition_rsi_turning_up", False):
+                score += weight
+            total_weight += weight
+
+        # 计算归一化评分 (0.0-1.0)
+        normalized_score = score / total_weight if total_weight > 0 else 0.0
+        return round(normalized_score, 3)
 
 
 if __name__ == "__main__":
@@ -292,9 +382,8 @@ if __name__ == "__main__":
                 latest_signals = buy_signals.tail(3)
                 # 添加信号标签
                 for date, row in latest_signals.iterrows():
-                    rsi_col = f"RSI_{strategy.params.get('rsi_length', 24)}"
                     print(
-                        f"日期: {date.strftime('%Y-%m-%d')}, 收盘价: {row['close']:.2f}, 得分: {row['score']}, MACD: {row['MACD']:.4f}, RSI: {row[rsi_col]:.2f}")
+                        f"日期: {date.strftime('%Y-%m-%d')}, 收盘价: {row['close']:.2f}, 得分: {row['score']}, MACD: {row['MACD_LINE']:.4f}, RSI: {row['RSI']:.2f}")
 
                 # 简单回测
                 backtest_result = strategy.backtest(data)

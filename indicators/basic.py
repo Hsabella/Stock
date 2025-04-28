@@ -88,96 +88,161 @@ class BasicIndicator:
             return df
 
     @staticmethod
-    def add_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26,
-                 signal: int = 9, column: str = "close") -> pd.DataFrame:
+    def add_macd(df: pd.DataFrame, fast_period: int = 12, slow_period: int = 26,
+                 signal_period: int = 9, price_col: str = "close") -> pd.DataFrame:
         """添加MACD指标
 
         Args:
             df: 数据源DataFrame
-            fast: 快线周期
-            slow: 慢线周期
-            signal: 信号线周期
-            column: 计算列名，默认为close
+            fast_period: 快线周期
+            slow_period: 慢线周期
+            signal_period: 信号线周期
+            price_col: 价格列名
 
         Returns:
             pd.DataFrame: 添加了MACD指标的DataFrame
         """
         try:
-            # 使用pandas_ta计算MACD
-            macd = ta.macd(df[column], fast=fast, slow=slow, signal=signal)
+            # 检查必要的列是否存在
+            if price_col not in df.columns:
+                logger.warning(f"数据中缺少{price_col}列，无法计算MACD指标")
+                return df
 
-            # 重命名列，使命名更明确
-            col_names = {
-                f"MACD_{fast}_{slow}_{signal}": f"MACD",
-                f"MACDh_{fast}_{slow}_{signal}": f"MACD_histogram",
-                f"MACDs_{fast}_{slow}_{signal}": f"MACD_signal"
-            }
-            macd = macd.rename(columns=col_names)
+            # 复制原始数据以避免警告
+            df_copy = df.copy()
 
-            # 合并到原始数据
-            result_df = pd.concat([df, macd], axis=1)
+            # 填充价格数据中的缺失值
+            price = df_copy[price_col].fillna(
+                method='ffill').fillna(method='bfill')
 
-            # 计算MACD变化率（用于判断金叉银叉）
-            result_df["MACD_diff"] = result_df["MACD"] - \
-                result_df["MACD_signal"]
+            # 检查是否仍有NaN值
+            if price.isna().any():
+                logger.warning(f"价格数据中存在无法填充的缺失值，无法计算MACD指标")
+                return df
 
-            # 判断金叉和死叉
-            result_df["MACD_golden_cross"] = (
-                result_df["MACD_diff"].shift(1) < 0) & (result_df["MACD_diff"] > 0)
-            result_df["MACD_dead_cross"] = (
-                result_df["MACD_diff"].shift(1) > 0) & (result_df["MACD_diff"] < 0)
+            # 手动计算MACD
+            exp1 = price.ewm(span=fast_period, adjust=False).mean()
+            exp2 = price.ewm(span=slow_period, adjust=False).mean()
+            macd_line = exp1 - exp2
+            signal_line = macd_line.ewm(
+                span=signal_period, adjust=False).mean()
+            histogram = macd_line - signal_line
 
-            # 判断零线金叉和零线死叉
-            result_df["MACD_zero_golden_cross"] = (
-                result_df["MACD"].shift(1) < 0) & (result_df["MACD"] > 0)
-            result_df["MACD_zero_dead_cross"] = (
-                result_df["MACD"].shift(1) > 0) & (result_df["MACD"] < 0)
+            # 创建结果DataFrame
+            result_df = df.copy()
+            result_df["MACD_LINE"] = macd_line
+            result_df["MACD_SIGNAL"] = signal_line
+            result_df["MACD_HIST"] = histogram
+
+            # 添加金叉死叉信号
+            result_df["MACD_GOLDEN_CROSS"] = (
+                (result_df["MACD_LINE"].shift(1).fillna(0) <= result_df["MACD_SIGNAL"].shift(1).fillna(0)) &
+                (result_df["MACD_LINE"].fillna(0) >
+                 result_df["MACD_SIGNAL"].fillna(0))
+            )
+
+            result_df["MACD_DEATH_CROSS"] = (
+                (result_df["MACD_LINE"].shift(1).fillna(0) >= result_df["MACD_SIGNAL"].shift(1).fillna(0)) &
+                (result_df["MACD_LINE"].fillna(0) <
+                 result_df["MACD_SIGNAL"].fillna(0))
+            )
+
+            # 添加零轴上下信号
+            result_df["MACD_ABOVE_ZERO"] = result_df["MACD_LINE"].fillna(0) > 0
+            result_df["MACD_BELOW_ZERO"] = result_df["MACD_LINE"].fillna(0) < 0
+
+            # 添加柱状图方向变化信号
+            result_df["MACD_HIST_TURN_POSITIVE"] = (
+                (result_df["MACD_HIST"].shift(1).fillna(0) <= 0) &
+                (result_df["MACD_HIST"].fillna(0) > 0)
+            )
+
+            result_df["MACD_HIST_TURN_NEGATIVE"] = (
+                (result_df["MACD_HIST"].shift(1).fillna(0) >= 0) &
+                (result_df["MACD_HIST"].fillna(0) < 0)
+            )
 
             return result_df
 
         except Exception as e:
+            import traceback
             logger.error(f"计算MACD指标出错: {str(e)}")
+            logger.debug(f"错误详情: {traceback.format_exc()}")
             return df
 
     @staticmethod
-    def add_rsi(df: pd.DataFrame, length: int = 14, overbought: int = 70,
-                oversold: int = 30, column: str = "close") -> pd.DataFrame:
+    def add_rsi(df: pd.DataFrame, period: int = 14, price_col: str = "close",
+                overbought: float = 70, oversold: float = 30) -> pd.DataFrame:
         """添加RSI指标
 
         Args:
             df: 数据源DataFrame
-            length: RSI周期
+            period: 周期
+            price_col: 价格列名
             overbought: 超买阈值
             oversold: 超卖阈值
-            column: 计算列名，默认为close
 
         Returns:
             pd.DataFrame: 添加了RSI指标的DataFrame
         """
         try:
-            # 计算RSI
-            rsi = ta.rsi(df[column], length=length)
+            # 检查必要的列是否存在
+            if price_col not in df.columns:
+                logger.warning(f"数据中缺少{price_col}列，无法计算RSI指标")
+                return df
 
-            # 重命名列
-            rsi = rsi.rename(f"RSI_{length}")
+            # 复制原始数据以避免警告
+            df_copy = df.copy()
 
-            # 合并到原始数据
-            result_df = pd.concat([df, rsi], axis=1)
+            # 填充价格数据中的缺失值
+            price = df_copy[price_col].fillna(
+                method='ffill').fillna(method='bfill')
 
-            # 判断超买超卖
-            result_df[f"RSI_{length}_overbought"] = result_df[f"RSI_{length}"] > overbought
-            result_df[f"RSI_{length}_oversold"] = result_df[f"RSI_{length}"] < oversold
+            # 检查是否仍有NaN值
+            if price.isna().any():
+                logger.warning(f"价格数据中存在无法填充的缺失值，无法计算RSI指标")
+                return df
 
-            # 判断拐点
-            result_df[f"RSI_{length}_rising"] = result_df[f"RSI_{length}"] > result_df[f"RSI_{length}"].shift(
-                1)
-            result_df[f"RSI_{length}_falling"] = result_df[f"RSI_{length}"] < result_df[f"RSI_{length}"].shift(
-                1)
+            # 手动计算RSI
+            delta = price.diff()
+            gain = delta.where(delta > 0, 0).fillna(0)
+            loss = -delta.where(delta < 0, 0).fillna(0)
+
+            avg_gain = gain.rolling(window=period).mean()
+            avg_loss = loss.rolling(window=period).mean()
+
+            # 防止除以零
+            rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
+            rsi = 100 - (100 / (1 + rs))
+
+            # 创建结果DataFrame
+            result_df = df.copy()
+            result_df["RSI"] = rsi
+
+            # 添加超买超卖信号
+            result_df["RSI_OVERBOUGHT"] = result_df["RSI"].fillna(
+                0) > overbought
+            result_df["RSI_OVERSOLD"] = result_df["RSI"].fillna(0) < oversold
+
+            # 添加交叉中线信号
+            result_df["RSI_ABOVE_50"] = result_df["RSI"].fillna(0) > 50
+            result_df["RSI_BELOW_50"] = result_df["RSI"].fillna(0) < 50
+
+            # 添加RSI背离信号（价格新高但RSI未创新高，或价格新低但RSI未创新低）
+            price_high = price.rolling(window=period).max() == price
+            price_low = price.rolling(window=period).min() == price
+            rsi_high = rsi.rolling(window=period).max() == rsi
+            rsi_low = rsi.rolling(window=period).min() == rsi
+
+            result_df["RSI_BEARISH_DIVERGENCE"] = price_high & ~rsi_high
+            result_df["RSI_BULLISH_DIVERGENCE"] = price_low & ~rsi_low
 
             return result_df
 
         except Exception as e:
+            import traceback
             logger.error(f"计算RSI指标出错: {str(e)}")
+            logger.debug(f"错误详情: {traceback.format_exc()}")
             return df
 
     @staticmethod
@@ -233,12 +298,12 @@ class BasicIndicator:
             )
 
             # 判断价格与均线关系
-            result_df["price_above_short_ma"] = result_df[
-                column] > result_df[f"MA_{short}"].fillna(0)
-            result_df["price_above_mid_ma"] = result_df[
-                column] > result_df[f"MA_{mid}"].fillna(0)
-            result_df["price_above_long_ma"] = result_df[
-                column] > result_df[f"MA_{long}"].fillna(0)
+            result_df["price_above_short_ma"] = result_df[column].fillna(
+                0) > result_df[f"MA_{short}"].fillna(0)
+            result_df["price_above_mid_ma"] = result_df[column].fillna(
+                0) > result_df[f"MA_{mid}"].fillna(0)
+            result_df["price_above_long_ma"] = result_df[column].fillna(
+                0) > result_df[f"MA_{long}"].fillna(0)
 
             return result_df
 
@@ -272,27 +337,20 @@ class BasicIndicator:
             result_df[f"VOLUME_MA_{long}"] = ta.sma(df["volume"], length=long)
 
             # 计算相对成交量
-            result_df["VOLUME_RATIO_S"] = df["volume"] / \
-                result_df[f"VOLUME_MA_{short}"]
-            result_df["VOLUME_RATIO_L"] = df["volume"] / \
-                result_df[f"VOLUME_MA_{long}"]
+            result_df["VOLUME_RATIO_S"] = df["volume"].fillna(0) / \
+                result_df[f"VOLUME_MA_{short}"].fillna(1)  # 防止除以0
+            result_df["VOLUME_RATIO_L"] = df["volume"].fillna(0) / \
+                result_df[f"VOLUME_MA_{long}"].fillna(1)  # 防止除以0
 
             # 判断放量
-            result_df["VOLUME_EXPAND"] = result_df["VOLUME_RATIO_L"] > 1.5
+            result_df["VOLUME_EXPAND"] = result_df["VOLUME_RATIO_L"].fillna(
+                0) > 1.5
 
             # 判断温和放量（成交量适度放大）
             result_df["VOLUME_MILD_EXPAND"] = (
-                (result_df["VOLUME_RATIO_L"] > 1.2) &
-                (result_df["VOLUME_RATIO_L"] < 2.0)
+                (result_df["VOLUME_RATIO_L"].fillna(0) > 1.2) &
+                (result_df["VOLUME_RATIO_L"].fillna(0) < 2.0)
             )
-
-            # 计算成交量变化率
-            result_df["VOLUME_CHANGE"] = df["volume"] / \
-                df["volume"].shift(1) - 1
-
-            # OBV指标(On-Balance Volume)
-            obv = ta.obv(df["close"], df["volume"])
-            result_df["OBV"] = obv
 
             return result_df
 
@@ -301,96 +359,166 @@ class BasicIndicator:
             return df
 
     @staticmethod
-    def add_bollinger(df: pd.DataFrame, length: int = 20, std: float = 2.0,
-                      column: str = "close") -> pd.DataFrame:
+    def add_bollinger(df: pd.DataFrame, window: int = 20, std_dev: int = 2,
+                      price_col: str = "close") -> pd.DataFrame:
         """添加布林带指标
 
         Args:
             df: 数据源DataFrame
-            length: 布林带周期
-            std: 标准差倍数
-            column: 计算列名，默认为close
+            window: 移动窗口大小
+            std_dev: 标准差系数
+            price_col: 价格列名
 
         Returns:
             pd.DataFrame: 添加了布林带指标的DataFrame
         """
         try:
-            # 计算布林带
-            boll = ta.bbands(df[column], length=length, std=std)
+            if price_col not in df.columns:
+                logger.warning(f"数据中缺少{price_col}列，无法计算布林带指标")
+                return df
 
-            # 重命名列
-            col_names = {
-                f"BBL_{length}_{float(std):.1f}": "BOLL_LOWER",
-                f"BBM_{length}_{float(std):.1f}": "BOLL_MIDDLE",
-                f"BBU_{length}_{float(std):.1f}": "BOLL_UPPER",
-                f"BBB_{length}_{float(std):.1f}": "BOLL_BANDWIDTH",
-                f"BBP_{length}_{float(std):.1f}": "BOLL_PERCENT"
-            }
-            boll = boll.rename(columns=col_names)
+            # 创建结果DataFrame
+            result_df = df.copy()
 
-            # 合并到原始数据
-            result_df = pd.concat([df, boll], axis=1)
+            # 处理价格列中的缺失值
+            price_data = result_df[price_col].fillna(
+                method='ffill').fillna(method='bfill')
 
-            # 判断价格与布林带关系
-            result_df["PRICE_ABOVE_BOLL_UPPER"] = df[column] > result_df["BOLL_UPPER"]
-            result_df["PRICE_BELOW_BOLL_LOWER"] = df[column] < result_df["BOLL_LOWER"]
-            result_df["PRICE_IN_BOLL"] = (
-                (df[column] <= result_df["BOLL_UPPER"]) &
-                (df[column] >= result_df["BOLL_LOWER"])
+            # 检查是否仍有NaN值
+            if price_data.isna().any():
+                logger.warning(f"价格数据中存在无法填充的缺失值，无法计算布林带指标")
+                return df
+
+            # 计算移动平均线
+            middle_band = price_data.rolling(window=window).mean()
+
+            # 计算标准差
+            sigma = price_data.rolling(window=window).std()
+
+            # 计算上下轨
+            upper_band = middle_band + std_dev * sigma
+            lower_band = middle_band - std_dev * sigma
+
+            # 添加布林带指标
+            result_df["BB_MIDDLE"] = middle_band
+            result_df["BB_UPPER"] = upper_band
+            result_df["BB_LOWER"] = lower_band
+
+            # 计算价格与布林带的关系
+            result_df["BB_UPPER_TOUCH"] = (
+                (result_df[price_col].shift(1).fillna(0) < result_df["BB_UPPER"].shift(1).fillna(0)) &
+                (result_df[price_col].fillna(0) >=
+                 result_df["BB_UPPER"].fillna(0))
             )
 
-            # 判断布林带收缩/扩张
-            result_df["BOLL_SQUEEZE"] = result_df["BOLL_BANDWIDTH"] < result_df["BOLL_BANDWIDTH"].shift(
-                1)
+            result_df["BB_LOWER_TOUCH"] = (
+                (result_df[price_col].shift(1).fillna(0) > result_df["BB_LOWER"].shift(1).fillna(0)) &
+                (result_df[price_col].fillna(0) <=
+                 result_df["BB_LOWER"].fillna(0))
+            )
+
+            result_df["BB_SQUEEZE"] = (
+                (result_df["BB_UPPER"].fillna(0) - result_df["BB_LOWER"].fillna(0)) /
+                result_df["BB_MIDDLE"].replace(0, np.finfo(
+                    float).eps).fillna(np.finfo(float).eps)
+            )
+
+            # 添加超买超卖判断
+            result_df["BB_OVERBOUGHT"] = result_df[price_col].fillna(
+                0) > result_df["BB_UPPER"].fillna(0)
+            result_df["BB_OVERSOLD"] = result_df[price_col].fillna(
+                0) < result_df["BB_LOWER"].fillna(0)
+
+            # 计算%B指标（价格在布林带中的相对位置）
+            bb_range = result_df["BB_UPPER"] - result_df["BB_LOWER"]
+            bb_range = bb_range.replace(0, np.finfo(float).eps)  # 避免除零错误
+            result_df["BB_PERCENT_B"] = (
+                result_df[price_col] - result_df["BB_LOWER"]) / bb_range
 
             return result_df
 
         except Exception as e:
+            import traceback
             logger.error(f"计算布林带指标出错: {str(e)}")
+            logger.debug(f"错误详情: {traceback.format_exc()}")
             return df
 
     @staticmethod
-    def add_kdj(df: pd.DataFrame, k: int = 9, d: int = 3, j: int = 3) -> pd.DataFrame:
+    def add_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3, m2: int = 3) -> pd.DataFrame:
         """添加KDJ指标
 
         Args:
             df: 数据源DataFrame
-            k: K值周期
-            d: D值周期
-            j: J值周期
+            n: 计算周期
+            m1: K值平滑系数
+            m2: D值平滑系数
 
         Returns:
             pd.DataFrame: 添加了KDJ指标的DataFrame
         """
         try:
-            if not all(col in df.columns for col in ["high", "low", "close"]):
-                logger.warning("数据中缺少high/low/close数据，无法计算KDJ指标")
+            # 检查必要的列是否存在
+            required_columns = ["high", "low", "close"]
+            missing_columns = [
+                col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                logger.warning(f"数据中缺少{', '.join(missing_columns)}列，无法计算KDJ指标")
                 return df
 
-            # 计算KDJ
-            kdj = ta.kdj(df["high"], df["low"], df["close"], k, d, j)
+            # 创建结果DataFrame和复制数据
+            result_df = df.copy()
+            df_copy = df.copy()
 
-            # 合并到原始数据
-            result_df = pd.concat([df, kdj], axis=1)
+            # 填充缺失值
+            for col in required_columns:
+                df_copy[col] = df_copy[col].fillna(
+                    method='ffill').fillna(method='bfill')
 
-            # 计算KDJ金叉和死叉
-            result_df["KDJ_J_CROSS_D"] = (
-                (result_df["J"].shift(1) < result_df["D"].shift(1)) &
-                (result_df["J"] > result_df["D"])
+            # 检查是否仍有NaN值
+            if df_copy[required_columns].isna().any().any():
+                logger.warning(f"价格数据中存在无法填充的缺失值，无法计算KDJ指标")
+                return df
+
+            # 手动计算KDJ
+            low_min = df_copy['low'].rolling(window=n).min()
+            high_max = df_copy['high'].rolling(window=n).max()
+
+            # 计算RSV，避免除零错误
+            rsv_divisor = high_max - low_min
+            rsv_divisor = rsv_divisor.replace(0, np.finfo(float).eps)
+            rsv = 100 * ((df_copy['close'] - low_min) / rsv_divisor)
+
+            # 使用EMA计算KDJ的三个值
+            k = rsv.ewm(alpha=1/m1, adjust=False).mean()
+            d = k.ewm(alpha=1/m2, adjust=False).mean()
+            j = 3 * k - 2 * d
+
+            # 添加KDJ指标到结果DataFrame
+            result_df["KDJ_K"] = k
+            result_df["KDJ_D"] = d
+            result_df["KDJ_J"] = j
+
+            # 添加金叉死叉判断
+            result_df["KDJ_GOLDEN_CROSS"] = (
+                (result_df["KDJ_K"].shift(1).fillna(0) <= result_df["KDJ_D"].shift(1).fillna(0)) &
+                (result_df["KDJ_K"].fillna(0) > result_df["KDJ_D"].fillna(0))
             )
-            result_df["KDJ_J_DEAD_CROSS_D"] = (
-                (result_df["J"].shift(1) > result_df["D"].shift(1)) &
-                (result_df["J"] < result_df["D"])
+
+            result_df["KDJ_DEATH_CROSS"] = (
+                (result_df["KDJ_K"].shift(1).fillna(0) >= result_df["KDJ_D"].shift(1).fillna(0)) &
+                (result_df["KDJ_K"].fillna(0) < result_df["KDJ_D"].fillna(0))
             )
 
-            # 判断超买超卖
-            result_df["KDJ_OVERBOUGHT"] = result_df["J"] > 80
-            result_df["KDJ_OVERSOLD"] = result_df["J"] < 20
+            # 添加超买超卖判断
+            result_df["KDJ_OVERBOUGHT"] = result_df["KDJ_J"].fillna(0) > 100
+            result_df["KDJ_OVERSOLD"] = result_df["KDJ_J"].fillna(0) < 0
 
             return result_df
 
         except Exception as e:
+            import traceback
             logger.error(f"计算KDJ指标出错: {str(e)}")
+            logger.debug(f"错误详情: {traceback.format_exc()}")
             return df
 
 

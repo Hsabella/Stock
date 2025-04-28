@@ -14,12 +14,12 @@ EXCLUDE_NEW = True  # 是否排除上市不足100天的新股
 
 # 技术指标设置
 DEFAULT_INDICATORS = {
-    "MACD": {"fast": 6, "slow": 12, "signal": 5},
-    "RSI": {"length": 24, "overbought": 70, "oversold": 30},
+    "MACD": {"fast_period": 6, "slow_period": 12, "signal_period": 5},
+    "RSI": {"period": 24, "overbought": 70, "oversold": 30},
     "MA": {"short": 5, "mid": 20, "long": 60},
     "VOLUME": {"short": 5, "long": 20},
-    "BOLL": {"length": 20, "std": 2.0},
-    "KDJ": {"k": 9, "d": 3, "j": 3}
+    "BOLL": {"window": 20, "std_dev": 2.0},
+    "KDJ": {"n": 9, "m1": 3, "m2": 3}
 }
 
 # 扫描设置

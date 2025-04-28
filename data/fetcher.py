@@ -8,6 +8,7 @@
 import time
 import datetime
 import pandas as pd
+import os
 from typing import List, Dict, Optional, Union, Tuple
 from retrying import retry
 from loguru import logger
@@ -151,8 +152,8 @@ class DataFetcher:
 
             # 过滤ST股票
             if EXCLUDE_ST and "name" in all_stocks.columns:
-                all_stocks = all_stocks[~all_stocks["name"].fillna(
-                    "").astype(str).str.contains("ST", na=False)]
+                all_stocks = all_stocks[~all_stocks["name"].astype(
+                    str).str.contains("ST", na=False)]
 
             # 过滤新股简化处理
             if EXCLUDE_NEW:
@@ -234,13 +235,172 @@ class DataFetcher:
             start_date = (datetime.datetime.strptime(end_date, "%Y-%m-%d") -
                           datetime.timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
 
+        # 首先尝试从缓存获取数据
+        cached_data = self._get_data_from_cache(
+            symbol, start_date, end_date, period, adjust)
+        if not cached_data.empty:
+            return cached_data
+
+        # 如果缓存不存在或过期，则从数据源获取
+        result_df = pd.DataFrame()
+
+        # 尝试主数据源
         if self.data_source == "akshare":
-            return self._get_k_data_akshare(symbol, start_date, end_date, period, adjust)
+            result_df = self._get_k_data_akshare(
+                symbol, start_date, end_date, period, adjust)
         elif self.data_source == "baostock":
-            return self._get_k_data_baostock(symbol, start_date, end_date, period, adjust)
+            result_df = self._get_k_data_baostock(
+                symbol, start_date, end_date, period, adjust)
         else:
             logger.error(f"不支持的数据源: {self.data_source}")
             return pd.DataFrame()
+
+        # 如果主数据源获取失败，尝试备用数据源
+        if result_df.empty and self.data_source == "akshare":
+            logger.warning(f"从akshare获取{symbol}数据失败，尝试使用备用方法")
+            result_df = self._get_k_data_alternative(
+                symbol, start_date, end_date)
+
+        # 如果akshare的备用方法获取失败，尝试baostock
+        if result_df.empty and self.data_source == "akshare" and bs:
+            logger.warning(f"从akshare备用方法获取{symbol}数据失败，尝试使用baostock")
+            result_df = self._get_k_data_baostock(
+                symbol, start_date, end_date, period, adjust)
+
+        # 如果baostock获取失败，尝试akshare
+        if result_df.empty and self.data_source == "baostock" and ak:
+            logger.warning(f"从baostock获取{symbol}数据失败，尝试使用akshare")
+            result_df = self._get_k_data_akshare(
+                symbol, start_date, end_date, period, adjust)
+
+            # 如果还是失败，尝试akshare的备用方法
+            if result_df.empty:
+                logger.warning(f"从akshare获取{symbol}数据失败，尝试使用akshare备用方法")
+                result_df = self._get_k_data_alternative(
+                    symbol, start_date, end_date)
+
+        # 如果获取到数据，保存到缓存
+        if not result_df.empty:
+            self._save_data_to_cache(result_df, symbol, period, adjust)
+
+        return result_df
+
+    def _get_data_from_cache(self, symbol: str, start_date: str, end_date: str,
+                             period: str, adjust: str) -> pd.DataFrame:
+        """从本地缓存获取数据"""
+        try:
+            # 创建缓存目录
+            cache_dir = os.path.join(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))), "cache")
+            if not os.path.exists(cache_dir):
+                os.makedirs(cache_dir)
+
+            cache_file = os.path.join(
+                cache_dir, f"{symbol}_{period}_{adjust}.csv")
+
+            # 如果缓存文件存在
+            if os.path.exists(cache_file):
+                # 检查文件修改时间，如果是今天，直接使用缓存
+                file_mtime = datetime.datetime.fromtimestamp(
+                    os.path.getmtime(cache_file))
+                today = datetime.datetime.now().replace(
+                    hour=0, minute=0, second=0, microsecond=0)
+
+                # 读取缓存数据
+                cached_data = pd.read_csv(cache_file)
+
+                # 如果缓存是今天的数据且不是交易时间，直接返回
+                if file_mtime >= today and datetime.datetime.now().hour < 15:
+                    if "date" in cached_data.columns:
+                        cached_data["date"] = pd.to_datetime(
+                            cached_data["date"])
+                        cached_data = cached_data.set_index("date")
+                    logger.info(f"使用缓存数据: {symbol}")
+                    return cached_data
+
+                # 否则检查是否需要更新
+                if "date" in cached_data.columns:
+                    cached_data["date"] = pd.to_datetime(cached_data["date"])
+                    cached_data = cached_data.set_index("date")
+
+                    # 检查缓存数据的日期范围
+                    cached_start = cached_data.index.min().strftime("%Y-%m-%d")
+                    cached_end = cached_data.index.max().strftime("%Y-%m-%d")
+
+                    # 如果缓存的数据已经覆盖了请求的日期范围，直接返回
+                    if cached_start <= start_date and cached_end >= end_date:
+                        logger.info(f"使用缓存数据（日期范围已覆盖）: {symbol}")
+                        # 过滤出请求的日期范围
+                        mask = (cached_data.index >= pd.Timestamp(start_date)) & (
+                            cached_data.index <= pd.Timestamp(end_date))
+                        return cached_data.loc[mask]
+
+                    # 如果有部分数据，只获取缺失的部分
+                    if cached_end >= start_date:
+                        # 更新起始日期为缓存结束日期后一天
+                        new_start_date = (pd.Timestamp(
+                            cached_end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+                        # 获取新数据
+                        if new_start_date <= end_date:
+                            logger.info(
+                                f"更新缓存数据: {symbol}, 从 {new_start_date} 到 {end_date}")
+                            if self.data_source == "akshare":
+                                new_data = self._get_k_data_akshare(
+                                    symbol, new_start_date, end_date, period, adjust)
+                            else:
+                                new_data = self._get_k_data_baostock(
+                                    symbol, new_start_date, end_date, period, adjust)
+
+                            if not new_data.empty:
+                                # 合并新旧数据
+                                combined_data = pd.concat(
+                                    [cached_data, new_data])
+                                # 去重
+                                combined_data = combined_data[~combined_data.index.duplicated(
+                                    keep='last')]
+                                # 排序
+                                combined_data = combined_data.sort_index()
+                                # 保存到缓存
+                                combined_data.to_csv(cache_file)
+
+                                # 过滤出请求的日期范围
+                                mask = (combined_data.index >= pd.Timestamp(start_date)) & (
+                                    combined_data.index <= pd.Timestamp(end_date))
+                                return combined_data.loc[mask]
+
+                        # 如果不需要更新，使用过滤后的缓存数据
+                        mask = (cached_data.index >= pd.Timestamp(start_date)) & (
+                            cached_data.index <= pd.Timestamp(end_date))
+                        filtered_data = cached_data.loc[mask]
+                        if not filtered_data.empty:
+                            return filtered_data
+
+            # 缓存不存在或者无法使用
+            return pd.DataFrame()
+
+        except Exception as e:
+            logger.error(f"从缓存获取数据出错: {str(e)}")
+            return pd.DataFrame()
+
+    def _save_data_to_cache(self, data: pd.DataFrame, symbol: str, period: str, adjust: str):
+        """保存数据到本地缓存"""
+        try:
+            # 创建缓存目录
+            cache_dir = os.path.join(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))), "cache")
+            if not os.path.exists(cache_dir):
+                os.makedirs(cache_dir)
+
+            cache_file = os.path.join(
+                cache_dir, f"{symbol}_{period}_{adjust}.csv")
+
+            # 保存数据
+            data.to_csv(cache_file)
+            logger.debug(f"数据已保存到缓存: {cache_file}")
+
+        except Exception as e:
+            logger.error(f"保存数据到缓存出错: {str(e)}")
 
     def _get_k_data_akshare(self, symbol: str, start_date: str, end_date: str,
                             period: str, adjust: str) -> pd.DataFrame:
@@ -251,11 +411,25 @@ class DataFetcher:
                 logger.error(f"无效的股票代码: {symbol}")
                 return pd.DataFrame()
 
-            # 转换代码格式
-            if symbol.startswith("6"):
-                formatted_symbol = f"sh{symbol}"
-            else:
-                formatted_symbol = f"sz{symbol}"
+            # 格式化股票代码 - akshare可能需要不同格式
+            original_symbol = symbol
+            # 移除可能的前缀
+            if symbol.startswith(('sh', 'sz')):
+                symbol = symbol[2:]
+
+            # 确保日期格式正确
+            try:
+                start_dt = pd.to_datetime(start_date)
+                end_dt = pd.to_datetime(end_date)
+                # 部分akshare接口需要特定格式的日期字符串
+                start_date_fmt = start_dt.strftime("%Y%m%d")
+                end_date_fmt = end_dt.strftime("%Y%m%d")
+                # 另一种格式
+                start_date_dash = start_dt.strftime("%Y-%m-%d")
+                end_date_dash = end_dt.strftime("%Y-%m-%d")
+            except Exception as e:
+                logger.error(f"日期格式转换错误: {str(e)}")
+                return pd.DataFrame()
 
             # 添加重试逻辑
             max_retries = 3
@@ -264,63 +438,161 @@ class DataFetcher:
                     # 应用频率限制
                     self._rate_limit()
 
-                    # 日K线
-                    if period == "daily":
-                        if adjust == "qfq":
-                            df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                                    start_date=start_date, end_date=end_date,
-                                                    adjust="qfq")
-                        elif adjust == "hfq":
-                            df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                                    start_date=start_date, end_date=end_date,
-                                                    adjust="hfq")
-                        else:
-                            df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                                    start_date=start_date, end_date=end_date,
-                                                    adjust="")
-                    # 周K线
-                    elif period == "weekly":
-                        df = ak.stock_zh_a_hist(symbol=symbol, period="weekly",
-                                                start_date=start_date, end_date=end_date)
-                    # 月K线
-                    elif period == "monthly":
-                        df = ak.stock_zh_a_hist(symbol=symbol, period="monthly",
-                                                start_date=start_date, end_date=end_date)
-                    else:
-                        logger.error(f"不支持的周期: {period}")
-                        return pd.DataFrame()
+                    # 记录详细的调试信息
+                    logger.debug(
+                        f"尝试获取股票数据: 代码={symbol}, 开始日期={start_date_dash}, 结束日期={end_date_dash}")
 
-                    # 检查API返回的数据是否有效
-                    if df is None or df.empty:
-                        if retry_count < max_retries - 1:
-                            logger.warning(
-                                f"获取{symbol}的K线数据为空，尝试第{retry_count+2}次重试...")
-                            time.sleep(1)  # 等待1秒后重试
-                            continue
-                        else:
-                            # 尝试从东方财富获取数据
-                            logger.warning(
-                                f"通过stock_zh_a_hist获取{symbol}数据失败，尝试使用stock_zh_a_daily...")
+                    # 尝试不同格式的日期参数
+                    try:
+                        # 先检查akshare的版本，获取支持的参数
+                        try:
+                            logger.debug(f"当前akshare版本: {ak.__version__}")
+                        except:
+                            logger.debug("无法获取akshare版本")
+
+                        # 尝试最新的几个稳定接口
+                        df = None
+
+                        # 尝试1: 优先使用新版东方财富接口 stock_zh_a_hist
+                        if df is None or df.empty:
                             try:
-                                df = self._get_k_data_alternative(
-                                    symbol, start_date, end_date)
-                                if df is None or df.empty:
-                                    logger.error(
-                                        f"获取{symbol}的K线数据失败，无法通过替代API获取")
-                                    return pd.DataFrame()
-                            except Exception as e:
-                                logger.error(
-                                    f"使用替代API获取{symbol}数据失败: {str(e)}")
+                                logger.debug(
+                                    f"尝试使用stock_zh_a_hist方法: symbol={symbol}")
+                                df = ak.stock_zh_a_hist(
+                                    symbol=symbol,
+                                    period="daily" if period == "daily" else period,
+                                    start_date=start_date_dash,
+                                    end_date=end_date_dash,
+                                    adjust=adjust if adjust else ""
+                                )
+                                if df is not None and not df.empty:
+                                    logger.debug(
+                                        f"stock_zh_a_hist成功: {len(df)}行")
+                            except Exception as e1:
+                                logger.debug(f"stock_zh_a_hist失败: {str(e1)}")
+
+                        # 尝试2: 使用腾讯的历史数据接口
+                        if df is None or df.empty:
+                            try:
+                                logger.debug(
+                                    f"尝试使用stock_zh_a_hist_tx方法: symbol={symbol}")
+                                # 腾讯接口需要带市场前缀
+                                tx_symbol = symbol
+                                if symbol.startswith('6'):
+                                    tx_symbol = f"sh{symbol}"
+                                elif symbol.startswith('0') or symbol.startswith('3'):
+                                    tx_symbol = f"sz{symbol}"
+
+                                df = ak.stock_zh_a_hist_tx(
+                                    symbol=tx_symbol,
+                                    start_date=start_date_dash,
+                                    end_date=end_date_dash
+                                )
+                                if df is not None and not df.empty:
+                                    logger.debug(
+                                        f"stock_zh_a_hist_tx成功: {len(df)}行")
+                            except Exception as e2:
+                                logger.debug(
+                                    f"stock_zh_a_hist_tx失败: {str(e2)}")
+
+                        # 尝试3: 使用东方财富分钟线接口，然后聚合
+                        if df is None or df.empty and period == "daily":
+                            try:
+                                logger.debug(
+                                    f"尝试使用stock_zh_a_hist_min_em方法: symbol={symbol}")
+                                # 获取日内分钟线数据，然后聚合为日线
+                                min_df = ak.stock_zh_a_hist_min_em(
+                                    symbol=symbol,
+                                    start_date=start_date_dash.replace(
+                                        '-', ''),
+                                    end_date=end_date_dash.replace('-', ''),
+                                    period='60'  # 60分钟线，减少数据量
+                                )
+                                if min_df is not None and not min_df.empty:
+                                    logger.debug(
+                                        f"stock_zh_a_hist_min_em成功: {len(min_df)}行")
+                                    # 聚合为日线
+                                    min_df['日期'] = pd.to_datetime(
+                                        min_df['时间']).dt.date
+                                    df = min_df.groupby('日期').agg({
+                                        '开盘': 'first',
+                                        '收盘': 'last',
+                                        '最高': 'max',
+                                        '最低': 'min',
+                                        '成交量': 'sum',
+                                        '成交额': 'sum'
+                                    }).reset_index()
+                                    # 格式化日期
+                                    df['日期'] = pd.to_datetime(df['日期'])
+                            except Exception as e3:
+                                logger.debug(
+                                    f"stock_zh_a_hist_min_em失败: {str(e3)}")
+
+                        # 尝试4: 使用股票最新日线行情来检查股票代码是否正确
+                        if df is None or df.empty:
+                            try:
+                                logger.debug(
+                                    f"尝试获取最新行情检查股票代码: symbol={symbol}")
+                                spot_df = ak.stock_zh_a_spot_em()
+                                if spot_df is not None and not spot_df.empty:
+                                    # 提取代码列
+                                    symbols = spot_df['代码'].tolist()
+                                    if symbol in symbols:
+                                        logger.debug(f"股票代码 {symbol} 存在于最新行情中")
+                                    else:
+                                        similar = [
+                                            s for s in symbols if s.endswith(symbol[-4:])]
+                                        if similar:
+                                            logger.debug(
+                                                f"找到可能的相似股票代码: {similar[:5]}")
+                            except Exception as e4:
+                                logger.debug(f"获取最新行情失败: {str(e4)}")
+
+                        # 尝试5: 备用老方法
+                        if df is None or df.empty:
+                            try:
+                                logger.debug(
+                                    f"尝试使用stock_zh_a_daily方法: symbol={symbol}")
+                                df = ak.stock_zh_a_daily(
+                                    symbol=symbol,
+                                    start_date=start_date_dash,
+                                    end_date=end_date_dash,
+                                    adjust=adjust
+                                )
+                                if df is not None and not df.empty:
+                                    logger.debug(
+                                        f"stock_zh_a_daily成功: {len(df)}行")
+                            except Exception as e5:
+                                logger.debug(f"stock_zh_a_daily失败: {str(e5)}")
+
+                        # 检查API返回的数据是否有效
+                        if df is None or df.empty:
+                            if retry_count < max_retries - 1:
+                                logger.warning(
+                                    f"获取{symbol}的K线数据为空，尝试第{retry_count+2}次重试...")
+                                time.sleep(2)  # 增加等待时间
+                                continue
+                            else:
+                                # 最后一次重试失败，记录错误
+                                logger.error(f"获取{symbol}的K线数据失败，数据为空")
                                 return pd.DataFrame()
 
-                    # 成功获取数据，跳出重试循环
-                    break
+                        # 成功获取数据，跳出重试循环
+                        logger.debug(f"成功获取{symbol}数据，共{len(df)}行")
+                        break
+                    except Exception as api_e:
+                        logger.error(f"所有API调用方法都失败: {str(api_e)}")
+                        df = pd.DataFrame()
+                        if retry_count < max_retries - 1:
+                            continue
+                        else:
+                            return pd.DataFrame()
 
                 except Exception as inner_e:
                     if retry_count < max_retries - 1:
                         logger.warning(
                             f"获取{symbol}的K线数据出错，尝试第{retry_count+2}次重试: {str(inner_e)}")
-                        time.sleep(1)  # 等待1秒后重试
+                        time.sleep(2)  # 增加等待时间
                     else:
                         # 最后一次重试也失败，记录错误并返回空DataFrame
                         logger.error(
@@ -347,7 +619,12 @@ class DataFetcher:
                 "high": "high",
                 "low": "low",
                 "volume": "volume",
-                "amount": "amount"
+                "amount": "amount",
+                # 股票日线数据
+                "证券代码": "symbol",
+                "股票代码": "symbol",
+                "代码": "symbol",
+                "名称": "name"
             }
 
             # 应用列映射
@@ -360,7 +637,7 @@ class DataFetcher:
                 df = df.rename(columns=renamed_cols)
 
             # 确保必要的列存在
-            required_cols = ["date", "open", "close", "high", "low", "volume"]
+            required_cols = ["date", "open", "close", "high", "low"]
             missing_cols = [
                 col for col in required_cols if col not in df.columns]
             if missing_cols:
@@ -385,46 +662,172 @@ class DataFetcher:
     def _get_k_data_alternative(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """使用东方财富数据源获取K线数据（备用方法）"""
         try:
-            # 尝试使用另一个akshare API
+            # 应用频率限制
+            self._rate_limit()
+
+            # 处理不同格式的股票代码
+            original_symbol = symbol
+            # 移除可能的前缀
+            if symbol.startswith(('sh', 'sz')):
+                symbol = symbol[2:]
+
+            logger.debug(
+                f"使用备用方法获取股票数据: 代码={symbol}, 开始日期={start_date}, 结束日期={end_date}")
+
+            # 最新版akshare的东方财富接口参数变更
+            # 需要转换代码格式
+            formatted_symbols = []
+
+            # 尝试多种格式
             if symbol.startswith("6"):
-                exchange = "1"  # 上交所
+                formatted_symbols = [
+                    symbol,                # 原始代码
+                    f"sh{symbol}",         # sh前缀
+                    f"1.{symbol}",         # 东方财富格式（上交所）
+                    f"sh.{symbol}"         # baostock格式
+                ]
+            elif symbol.startswith("0") or symbol.startswith("3"):
+                formatted_symbols = [
+                    symbol,                # 原始代码
+                    f"sz{symbol}",         # sz前缀
+                    f"0.{symbol}",         # 东方财富格式（深交所）
+                    f"sz.{symbol}"         # baostock格式
+                ]
             else:
-                exchange = "0"  # 深交所
+                formatted_symbols = [
+                    symbol,
+                    f"sh{symbol}",
+                    f"sz{symbol}",
+                    f"1.{symbol}",
+                    f"0.{symbol}"
+                ]
 
-            # 东方财富数据接口
-            try:
-                # 应用频率限制
-                self._rate_limit()
+            # 尝试不同的股票代码格式
+            for fmt_symbol in formatted_symbols:
+                logger.debug(f"尝试使用股票代码格式: {fmt_symbol}")
 
-                # 使用东方财富数据
-                df = ak.stock_zh_a_daily(
-                    symbol=symbol, start_date=start_date, end_date=end_date, adjust="qfq")
+                try:
+                    # 尝试使用stock_zh_a_hist作为备用方法
+                    self._rate_limit()
+                    try:
+                        df = ak.stock_zh_a_hist(
+                            symbol=fmt_symbol,
+                            period="daily",
+                            start_date=start_date,
+                            end_date=end_date,
+                            adjust="qfq"
+                        )
 
-                # 确保数据不为空
-                if df is None or df.empty:
-                    return pd.DataFrame()
+                        # 检查返回数据
+                        if df is not None and not df.empty:
+                            logger.info(
+                                f"使用stock_zh_a_hist备用方法成功获取{fmt_symbol}数据，共{len(df)}行")
 
-                # 标准化列名
-                df = df.rename(columns={
-                    "date": "date",
-                    "open": "open",
-                    "high": "high",
-                    "low": "low",
-                    "close": "close",
-                    "volume": "volume"
-                })
+                            # 检查列名并标准化
+                            if "日期" in df.columns:  # 中文列名
+                                df = df.rename(columns={
+                                    "日期": "date",
+                                    "开盘": "open",
+                                    "收盘": "close",
+                                    "最高": "high",
+                                    "最低": "low",
+                                    "成交量": "volume",
+                                    "成交额": "amount"
+                                })
 
-                # 格式化日期列
-                df["date"] = pd.to_datetime(df["date"])
+                            # 确保date是datetime类型
+                            df["date"] = pd.to_datetime(df["date"])
+                            df = df.sort_values("date")
 
-                return df
+                            return df
+                    except Exception as e:
+                        logger.debug(
+                            f"使用stock_zh_a_hist备用方法获取{fmt_symbol}数据失败: {str(e)}")
 
-            except Exception as e:
-                logger.warning(f"使用stock_zh_a_daily获取{symbol}数据失败: {str(e)}")
-                return pd.DataFrame()
+                    # 尝试使用新版东方财富接口
+                    try:
+                        self._rate_limit()
+                        df = ak.stock_zh_a_daily(
+                            symbol=fmt_symbol, start_date=start_date, end_date=end_date, adjust="qfq")
+
+                        if df is not None and not df.empty:
+                            logger.info(
+                                f"使用stock_zh_a_daily成功获取{fmt_symbol}数据，共{len(df)}行")
+
+                            # 确保有必要的列
+                            if "date" not in df.columns:
+                                if df.index.name == "date":
+                                    df = df.reset_index()
+                                else:
+                                    continue
+
+                            # 确保数据类型正确
+                            df["date"] = pd.to_datetime(df["date"])
+
+                            return df
+                    except Exception as e2:
+                        logger.debug(
+                            f"使用stock_zh_a_daily获取{fmt_symbol}数据失败: {str(e2)}")
+
+                    # 尝试第三种方法 - 新浪财经数据
+                    try:
+                        self._rate_limit()
+
+                        # 不同格式尝试
+                        sina_symbols = []
+                        if fmt_symbol.startswith("sh") or fmt_symbol.startswith("sz"):
+                            sina_symbols.append(fmt_symbol)
+                        elif fmt_symbol.startswith("6"):
+                            sina_symbols.append(f"sh{fmt_symbol}")
+                        else:
+                            sina_symbols.append(f"sz{fmt_symbol}")
+
+                        for sina_symbol in sina_symbols:
+                            try:
+                                logger.debug(f"尝试使用新浪接口获取数据: {sina_symbol}")
+                                df = ak.stock_zh_index_daily_tx(
+                                    symbol=sina_symbol)
+
+                                if df is not None and not df.empty:
+                                    logger.info(
+                                        f"使用新浪数据源成功获取{sina_symbol}数据，共{len(df)}行")
+
+                                    # 标准化列名
+                                    standard_columns = {
+                                        "date": "date",
+                                        "open": "open",
+                                        "close": "close",
+                                        "high": "high",
+                                        "low": "low",
+                                        "volume": "volume"
+                                    }
+
+                                    df = df.rename(columns={col: standard_columns[col]
+                                                            for col in df.columns
+                                                            if col in standard_columns})
+
+                                    # 确保date是datetime类型
+                                    df["date"] = pd.to_datetime(df["date"])
+
+                                    return df
+                            except Exception as e_sina:
+                                logger.debug(
+                                    f"使用新浪接口获取{sina_symbol}数据失败: {str(e_sina)}")
+                                continue
+                    except Exception as e3:
+                        logger.debug(f"所有新浪接口尝试均失败: {str(e3)}")
+
+                except Exception as e_all:
+                    logger.debug(f"对代码{fmt_symbol}的所有尝试均失败: {str(e_all)}")
+                    continue
+
+            # 如果所有尝试都失败
+            logger.error(f"所有备用方法获取{symbol}数据均失败")
+            return pd.DataFrame()
 
         except Exception as e:
             logger.error(f"获取{symbol}的替代K线数据失败: {str(e)}")
+            logger.debug(traceback.format_exc())
             return pd.DataFrame()
 
     def _get_k_data_baostock(self, symbol: str, start_date: str, end_date: str,
@@ -677,6 +1080,75 @@ class DataFetcher:
             time.sleep(self.request_interval - elapsed)
         self.last_request_time = time.time()
 
+    def test_stock_data_fetch(self, symbol: str) -> bool:
+        """测试获取特定股票的数据，用于调试和确认功能正常
+
+        Args:
+            symbol: 股票代码
+
+        Returns:
+            bool: 是否成功获取数据
+        """
+        logger.info(f"测试获取股票数据: {symbol}")
+
+        # 设置较短的时间段，提高测试速度
+        end_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.datetime.now() -
+                      datetime.timedelta(days=30)).strftime("%Y-%m-%d")
+
+        # 先尝试从主数据源获取
+        logger.info(f"尝试从主数据源 {self.data_source} 获取数据...")
+        if self.data_source == "akshare":
+            df = self._get_k_data_akshare(
+                symbol, start_date, end_date, "daily", "qfq")
+        else:
+            df = self._get_k_data_baostock(
+                symbol, start_date, end_date, "daily", "qfq")
+
+        if not df.empty:
+            logger.info(f"成功从主数据源获取到数据，共 {len(df)} 行")
+            return True
+
+        # 尝试备用方法
+        logger.info(f"从主数据源获取失败，尝试备用方法...")
+        df = self._get_k_data_alternative(symbol, start_date, end_date)
+
+        if not df.empty:
+            logger.info(f"成功从备用方法获取到数据，共 {len(df)} 行")
+            return True
+
+        # 如果akshare备用方法获取失败，尝试baostock
+        if self.data_source == "akshare" and bs:
+            logger.info(f"从akshare备用方法获取失败，尝试使用baostock...")
+            df = self._get_k_data_baostock(
+                symbol, start_date, end_date, "daily", "qfq")
+
+            if not df.empty:
+                logger.info(f"成功从baostock获取到数据，共 {len(df)} 行")
+                return True
+
+        # 如果baostock获取失败，尝试akshare
+        if self.data_source == "baostock" and ak:
+            logger.info(f"从baostock获取失败，尝试使用akshare...")
+            df = self._get_k_data_akshare(
+                symbol, start_date, end_date, "daily", "qfq")
+
+            if not df.empty:
+                logger.info(f"成功从akshare获取到数据，共 {len(df)} 行")
+                return True
+
+            # 如果还是失败，尝试akshare的备用方法
+            if df.empty:
+                logger.info(f"从akshare获取失败，尝试使用akshare备用方法...")
+                df = self._get_k_data_alternative(symbol, start_date, end_date)
+
+                if not df.empty:
+                    logger.info(f"成功从akshare备用方法获取到数据，共 {len(df)} 行")
+                    return True
+
+        logger.error(f"所有方法获取 {symbol} 数据均失败!")
+        return False
+
 
 # 创建全局实例
 data_fetcher = DataFetcher(data_source=DATA_SOURCE)
@@ -708,6 +1180,14 @@ if __name__ == "__main__":
             print(f"\n获取{first_stock}的实时行情...")
             quotes = data_fetcher.get_real_time_quotes([first_stock])
             print(quotes)
+
+        # 测试特定股票数据获取
+        # 选择几只常见会出问题的股票进行测试
+        problem_stocks = ["002797", "002772", "002539"]
+        print("\n测试常见问题股票数据获取:")
+        for stock in problem_stocks:
+            success = data_fetcher.test_stock_data_fetch(stock)
+            print(f"{stock}: {'成功' if success else '失败'}")
 
     # 获取指数数据
     print("\n获取上证指数数据...")
