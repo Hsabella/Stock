@@ -20,21 +20,22 @@ MACD_RSI_STRATEGY = {
     "name": "MACD与RSI超卖策略",
     "description": "MACD金叉与RSI低位共振策略",
     "params": {
-        "macd_fast": 6,
-        "macd_slow": 12,
-        "macd_signal": 5,
-        "rsi_length": 24,
-        "rsi_oversold": 30,
+        "macd_fast": 12,  # 调整为标准值以适应大多数市场
+        "macd_slow": 26,
+        "macd_signal": 9,
+        "rsi_length": 14,  # 使用标准RSI周期
+        "rsi_oversold": 35,  # 放宽超卖条件（增大阈值）
         "rsi_overbought": 70
     },
     "conditions": {
         "macd_crossover": True,  # MACD金叉
-        "macd_zero_crossover": True,  # MACD零线上穿
+        "macd_zero_crossover": False,  # 不强制要求零线上穿
         "rsi_oversold": True,  # RSI处于超卖区
-        "price_above_ma": False  # 价格位于均线之上
+        "price_above_ma": False,  # 价格位于均线之上
+        "rsi_turning_up": True  # 添加RSI转向向上的条件
     },
-    "logic": "AND",  # 条件逻辑：AND全部满足，OR任一满足
-    "min_score": 80  # 最低分数要求（0-100）
+    "logic": "OR",  # 条件逻辑：修改为OR，只要满足任一条件
+    "min_score": 50  # 降低最低分数要求（0-100）
 }
 
 # 均线交叉策略配置

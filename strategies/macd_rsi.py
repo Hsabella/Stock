@@ -182,23 +182,23 @@ class MacdRsiStrategy(StrategyBase):
             pd.Series: 0-100的得分，分数越高代表买入信号越强
         """
         # 获取参数
-        macd_fast = self.params.get("macd_fast", 6)
-        macd_slow = self.params.get("macd_slow", 12)
-        macd_signal = self.params.get("macd_signal", 5)
-        rsi_length = self.params.get("rsi_length", 24)
-        rsi_oversold = self.params.get("rsi_oversold", 30)
+        macd_fast = self.params.get("macd_fast", 12)
+        macd_slow = self.params.get("macd_slow", 26)
+        macd_signal = self.params.get("macd_signal", 9)
+        rsi_length = self.params.get("rsi_length", 14)
+        rsi_oversold = self.params.get("rsi_oversold", 35)
 
         # 初始化得分为0
         score = pd.Series(0, index=data.index)
 
-        # 1. MACD金叉： 有金叉加10分
+        # 1. MACD金叉： 有金叉加20分 (增加权重)
         if "MACD_GOLDEN_CROSS" in data.columns:
-            score.loc[data["MACD_GOLDEN_CROSS"]] += 10
+            score.loc[data["MACD_GOLDEN_CROSS"]] += 20
 
-        # 2. MACD零线以上： 10分
+        # 2. MACD零线以上： 15分 (增加权重)
         if "MACD_LINE" in data.columns:
             # MACD值为正数，加分
-            score.loc[data["MACD_LINE"].fillna(0) > 0] += 10
+            score.loc[data["MACD_LINE"].fillna(0) > 0] += 15
 
             # 计算MACD上穿零线的强度
             zero_cross = (data["MACD_LINE"].shift(1).fillna(
@@ -225,7 +225,7 @@ class MacdRsiStrategy(StrategyBase):
                                 score.loc[idx] = score.loc[idx] + \
                                     normalized.loc[idx]
 
-        # 3. RSI超卖程度: 0-15分
+        # 3. RSI超卖程度: 0-20分 (增加权重)
         if "RSI" in data.columns:
             # RSI值越低，分数越高（但不包括极端异常值）
             rsi_values = data["RSI"].fillna(50)  # 使用中性值填充空值
@@ -236,13 +236,18 @@ class MacdRsiStrategy(StrategyBase):
                 # 只对超卖的数据计算分数
                 rsi_oversold_values = rsi_values[oversold_mask]
                 rsi_oversold_score = (
-                    (rsi_oversold - rsi_oversold_values) / rsi_oversold * 15).clip(0, 15)
+                    (rsi_oversold - rsi_oversold_values) / rsi_oversold * 20).clip(0, 20)
 
                 # 安全地将分数加到score上
                 for idx in rsi_oversold_score.index:
                     if idx in score.index:
                         score.loc[idx] = score.loc[idx] + \
                             rsi_oversold_score.loc[idx]
+
+        # 3.1 RSI向上拐头: 15分 (新增)
+        rsi_turning_up = (data["RSI"].shift(1).fillna(0) < data["RSI"].fillna(0)) & \
+            (data["RSI"].shift(2).fillna(0) > data["RSI"].shift(1).fillna(0))
+        score.loc[rsi_turning_up] += 15
 
         # 4. 成交量确认: 0-10分
         if "VOLUME_EXPAND" in data.columns:
@@ -256,6 +261,30 @@ class MacdRsiStrategy(StrategyBase):
         if "BB_LOWER_TOUCH" in data.columns:
             # 价格低于布林下轨，可能超跌
             score.loc[data["BB_LOWER_TOUCH"].fillna(False)] += 10
+
+        # 6. 均线支撑确认: 0-10分 (新增)
+        if "price_above_mid_ma" in data.columns:
+            # 价格位于中期均线之上，表明有支撑
+            score.loc[data["price_above_mid_ma"].fillna(False)] += 5
+
+        if "MA_short_cross_mid" in data.columns:
+            # 短期均线上穿中期均线，加分
+            score.loc[data["MA_short_cross_mid"].fillna(False)] += 5
+
+        # 7. 趋势持续性: 0-10分 (新增)
+        # 连续上涨（收盘价连续高于前一日）
+        if "close" in data.columns:
+            price_rising = data["close"].fillna(
+                0) > data["close"].shift(1).fillna(0)
+            # 连续2天上涨
+            two_days_rising = price_rising & price_rising.shift(
+                1).fillna(False)
+            score.loc[two_days_rising] += 5
+
+            # 连续3天上涨
+            three_days_rising = two_days_rising & price_rising.shift(
+                2).fillna(False)
+            score.loc[three_days_rising] += 5
 
         # 确保分数是浮点数，然后四舍五入到整数
         return score.astype(float).round().astype('Int64').clip(0, 100)
