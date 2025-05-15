@@ -18,429 +18,498 @@ class BasicIndicator:
     """基础技术指标计算类"""
 
     @staticmethod
-    def calculate_all(df: pd.DataFrame, indicators: Dict = None) -> pd.DataFrame:
-        """计算所有配置的技术指标
+    def calculate_all(df: pd.DataFrame, config: Dict = None) -> pd.DataFrame:
+        """计算所有基础指标
 
         Args:
-            df: 包含OHLCV数据的DataFrame
-            indicators: 指标配置，默认使用settings中的DEFAULT_INDICATORS
+            df: 原始数据
+            config: 指标配置
 
         Returns:
-            pd.DataFrame: 添加了技术指标的DataFrame
+            pd.DataFrame: 包含计算后的所有指标的DataFrame
         """
-        if df.empty:
-            logger.warning("输入数据为空，无法计算指标")
-            return df
+        # 创建计算器实例
+        calculator = BasicIndicator()
 
-        # 检查必要的列是否存在
-        required_cols = ["close"]
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            logger.error(f"数据缺少必要列: {missing_cols}, 无法计算指标")
-            logger.debug(f"可用列: {df.columns.tolist()}")
-            return df
-
-        # 复制数据，避免修改原始数据
+        # 使用输入数据的拷贝
         result_df = df.copy()
 
-        # 使用默认配置或传入的配置
-        indicators = indicators or DEFAULT_INDICATORS
+        # 配置默认值
+        default_config = {
+            "MA": {"short": 5, "mid": 20, "long": 60},
+            "MACD": {"fast_period": 12, "slow_period": 26, "signal_period": 9},
+            "RSI": {"period": 14, "overbought": 70, "oversold": 30},
+            "BOLL": {"window": 20, "std_dev": 2.0},
+            "KDJ": {"n": 9, "m1": 3, "m2": 3},
+            "VOLUME": {"short": 5, "long": 20}
+        }
 
-        # 计算各类指标
+        # 合并用户配置
+        if config:
+            for key, value in config.items():
+                if key in default_config:
+                    default_config[key].update(value)
+                else:
+                    default_config[key] = value
+
+        # 检查是否有成交量数据
+        has_volume = "volume" in result_df.columns and not result_df["volume"].isna(
+        ).all()
+
+        if not has_volume:
+            # 尝试使用价格范围作为成交量的替代
+            logger.info("使用价格波动范围作为成交量的替代")
+            if all(col in result_df.columns for col in ["high", "low"]):
+                result_df["volume"] = (
+                    result_df["high"] - result_df["low"]) * 1000
+                has_volume = True
+
         try:
-            if "MACD" in indicators:
-                result_df = BasicIndicator.add_macd(
-                    result_df, **indicators["MACD"])
-
-            if "RSI" in indicators:
-                result_df = BasicIndicator.add_rsi(
-                    result_df, **indicators["RSI"])
-
-            if "MA" in indicators:
+            # 添加移动平均线
+            if "MA" in default_config:
+                ma_config = default_config["MA"]
                 result_df = BasicIndicator.add_ma(
-                    result_df, **indicators["MA"])
+                    result_df,
+                    price_col="close",
+                    period_short=ma_config["short"],
+                    period_mid=ma_config["mid"],
+                    period_long=ma_config["long"]
+                )
 
-            if "VOLUME" in indicators:
-                # 检查volume列是否存在
-                if "volume" in result_df.columns:
-                    result_df = BasicIndicator.add_volume_indicators(
-                        result_df, **indicators["VOLUME"])
-                else:
-                    logger.warning("数据中缺少volume列，跳过计算成交量指标")
+            # 添加MACD
+            if "MACD" in default_config:
+                macd_config = default_config["MACD"]
+                result_df = BasicIndicator.add_macd(
+                    result_df,
+                    price_col="close",
+                    fast_period=macd_config["fast_period"],
+                    slow_period=macd_config["slow_period"],
+                    signal_period=macd_config["signal_period"]
+                )
 
-            if "BOLL" in indicators:
+            # 添加RSI
+            if "RSI" in default_config:
+                rsi_config = default_config["RSI"]
+                result_df = BasicIndicator.add_rsi(
+                    result_df,
+                    price_col="close",
+                    period=rsi_config["period"],
+                    overbought=rsi_config["overbought"],
+                    oversold=rsi_config["oversold"]
+                )
+
+            # 添加布林带
+            if "BOLL" in default_config:
+                boll_config = default_config["BOLL"]
                 result_df = BasicIndicator.add_bollinger(
-                    result_df, **indicators["BOLL"])
+                    result_df,
+                    price_col="close",
+                    window=boll_config["window"],
+                    std_dev=boll_config["std_dev"]
+                )
 
-            if "KDJ" in indicators:
-                # 检查高低价列是否存在
-                if "high" in result_df.columns and "low" in result_df.columns:
-                    result_df = BasicIndicator.add_kdj(
-                        result_df, **indicators["KDJ"])
-                else:
-                    logger.warning("数据中缺少high/low列，跳过计算KDJ指标")
+            # 添加KDJ
+            if "KDJ" in default_config:
+                kdj_config = default_config["KDJ"]
+                result_df = BasicIndicator.add_kdj(
+                    result_df,
+                    n=kdj_config["n"],
+                    m1=kdj_config["m1"],
+                    m2=kdj_config["m2"]
+                )
 
-            return result_df
+            # 添加成交量指标
+            if has_volume and "VOLUME" in default_config:
+                vol_config = default_config["VOLUME"]
+                result_df = BasicIndicator.add_volume_indicators(
+                    result_df,
+                    period_short=vol_config["short"],
+                    period_long=vol_config["long"]
+                )
+
+            # 缺失值处理 - 填充技术指标的缺失值
+            for col in result_df.columns:
+                if col not in df.columns:  # 只处理新增的指标列
+                    # 对于非布尔类型的列，使用0填充
+                    if result_df[col].dtype != bool:
+                        result_df[col] = result_df[col].fillna(0)
+                    else:
+                        # 对于布尔列，使用False填充
+                        result_df[col] = result_df[col].fillna(False)
+
         except Exception as e:
             logger.error(f"计算指标时发生错误: {str(e)}")
             import traceback
             logger.debug(traceback.format_exc())
-            return df
+
+        return result_df
 
     @staticmethod
-    def add_macd(df: pd.DataFrame, fast_period: int = 12, slow_period: int = 26,
-                 signal_period: int = 9, price_col: str = "close") -> pd.DataFrame:
+    def add_macd(df: pd.DataFrame, price_col: str = "close",
+                 fast_period: int = 12, slow_period: int = 26,
+                 signal_period: int = 9) -> pd.DataFrame:
         """添加MACD指标
 
         Args:
-            df: 数据源DataFrame
-            fast_period: 快线周期
-            slow_period: 慢线周期
-            signal_period: 信号线周期
-            price_col: 价格列名
+            df: 原始数据
+            price_col: 价格列名，默认为'close'
+            fast_period: 快线周期，默认为12
+            slow_period: 慢线周期，默认为26
+            signal_period: 信号线周期，默认为9
 
         Returns:
-            pd.DataFrame: 添加了MACD指标的DataFrame
+            pd.DataFrame: 包含MACD指标的DataFrame
         """
         try:
-            # 检查必要的列是否存在
+            # 检查价格列是否存在
             if price_col not in df.columns:
-                logger.warning(f"数据中缺少{price_col}列，无法计算MACD指标")
+                logger.error(f"MACD计算错误: 列 '{price_col}' 不存在于数据中")
                 return df
 
-            # 复制原始数据以避免警告
+            # 创建副本，避免警告
             df_copy = df.copy()
 
-            # 填充价格数据中的缺失值
-            price = df_copy[price_col].fillna(
-                method='ffill').fillna(method='bfill')
+            # 确保价格数据完整，填充缺失值
+            price = df_copy[price_col].ffill().bfill()
 
-            # 检查是否仍有NaN值
-            if price.isna().any():
-                logger.warning(f"价格数据中存在无法填充的缺失值，无法计算MACD指标")
-                return df
+            # 计算EMA
+            ema_fast = price.ewm(span=fast_period, adjust=False).mean()
+            ema_slow = price.ewm(span=slow_period, adjust=False).mean()
 
-            # 手动计算MACD
-            exp1 = price.ewm(span=fast_period, adjust=False).mean()
-            exp2 = price.ewm(span=slow_period, adjust=False).mean()
-            macd_line = exp1 - exp2
+            # 计算MACD线和信号线
+            macd_line = ema_fast - ema_slow
             signal_line = macd_line.ewm(
                 span=signal_period, adjust=False).mean()
             histogram = macd_line - signal_line
 
             # 创建结果DataFrame
-            result_df = df.copy()
+            result_df = df_copy.copy()
             result_df["MACD_LINE"] = macd_line
             result_df["MACD_SIGNAL"] = signal_line
             result_df["MACD_HIST"] = histogram
 
-            # 添加金叉死叉信号
-            result_df["MACD_GOLDEN_CROSS"] = (
-                (result_df["MACD_LINE"].shift(1).fillna(0) <= result_df["MACD_SIGNAL"].shift(1).fillna(0)) &
-                (result_df["MACD_LINE"].fillna(0) >
-                 result_df["MACD_SIGNAL"].fillna(0))
-            )
+            # 检测MACD金叉和死叉
+            result_df["MACD_GOLDEN_CROSS"] = (macd_line.shift(
+                1) <= signal_line.shift(1)) & (macd_line > signal_line)
+            result_df["MACD_DEATH_CROSS"] = (macd_line.shift(
+                1) >= signal_line.shift(1)) & (macd_line < signal_line)
 
-            result_df["MACD_DEATH_CROSS"] = (
-                (result_df["MACD_LINE"].shift(1).fillna(0) >= result_df["MACD_SIGNAL"].shift(1).fillna(0)) &
-                (result_df["MACD_LINE"].fillna(0) <
-                 result_df["MACD_SIGNAL"].fillna(0))
-            )
+            # 检测MACD柱状图方向变化（拐点）
+            hist_shift = histogram.shift(1)
+            result_df["MACD_HIST_REVERSAL_UP"] = (
+                hist_shift < 0) & (histogram > hist_shift)
+            result_df["MACD_HIST_REVERSAL_DOWN"] = (
+                hist_shift > 0) & (histogram < hist_shift)
 
-            # 添加零轴上下信号
-            result_df["MACD_ABOVE_ZERO"] = result_df["MACD_LINE"].fillna(0) > 0
-            result_df["MACD_BELOW_ZERO"] = result_df["MACD_LINE"].fillna(0) < 0
-
-            # 添加柱状图方向变化信号
-            result_df["MACD_HIST_TURN_POSITIVE"] = (
-                (result_df["MACD_HIST"].shift(1).fillna(0) <= 0) &
-                (result_df["MACD_HIST"].fillna(0) > 0)
-            )
-
-            result_df["MACD_HIST_TURN_NEGATIVE"] = (
-                (result_df["MACD_HIST"].shift(1).fillna(0) >= 0) &
-                (result_df["MACD_HIST"].fillna(0) < 0)
-            )
+            # 检测零轴金叉和死叉
+            result_df["MACD_ZERO_GOLDEN_CROSS"] = (
+                macd_line.shift(1) <= 0) & (macd_line > 0)
+            result_df["MACD_ZERO_DEATH_CROSS"] = (
+                macd_line.shift(1) >= 0) & (macd_line < 0)
 
             return result_df
 
         except Exception as e:
-            import traceback
-            logger.error(f"计算MACD指标出错: {str(e)}")
-            logger.debug(f"错误详情: {traceback.format_exc()}")
+            logger.error(f"MACD计算错误: {str(e)}")
             return df
 
     @staticmethod
-    def add_rsi(df: pd.DataFrame, period: int = 14, price_col: str = "close",
+    def add_rsi(df: pd.DataFrame, price_col: str = "close", period: int = 14,
                 overbought: float = 70, oversold: float = 30) -> pd.DataFrame:
         """添加RSI指标
 
         Args:
-            df: 数据源DataFrame
-            period: 周期
-            price_col: 价格列名
-            overbought: 超买阈值
-            oversold: 超卖阈值
+            df: 原始数据
+            price_col: 价格列名，默认为'close'
+            period: 计算周期，默认为14
+            overbought: 超买阈值，默认为70
+            oversold: 超卖阈值，默认为30
 
         Returns:
-            pd.DataFrame: 添加了RSI指标的DataFrame
+            pd.DataFrame: 包含RSI指标的DataFrame
         """
         try:
-            # 检查必要的列是否存在
+            # 检查价格列是否存在
             if price_col not in df.columns:
-                logger.warning(f"数据中缺少{price_col}列，无法计算RSI指标")
+                logger.error(f"RSI计算错误: 列 '{price_col}' 不存在于数据中")
                 return df
 
-            # 复制原始数据以避免警告
+            # 创建副本，避免警告
             df_copy = df.copy()
 
-            # 填充价格数据中的缺失值
-            price = df_copy[price_col].fillna(
-                method='ffill').fillna(method='bfill')
+            # 确保价格数据完整，填充缺失值
+            price = df_copy[price_col].ffill().bfill()
 
-            # 检查是否仍有NaN值
-            if price.isna().any():
-                logger.warning(f"价格数据中存在无法填充的缺失值，无法计算RSI指标")
-                return df
-
-            # 手动计算RSI
+            # 计算价格变化
             delta = price.diff()
-            gain = delta.where(delta > 0, 0).fillna(0)
-            loss = -delta.where(delta < 0, 0).fillna(0)
 
+            # 区分上涨和下跌
+            gain = delta.where(delta > 0, 0)
+            loss = -delta.where(delta < 0, 0)
+
+            # 计算初始平均值
             avg_gain = gain.rolling(window=period).mean()
             avg_loss = loss.rolling(window=period).mean()
 
-            # 防止除以零
-            rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
+            # 计算相对强度
+            rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)  # 避免除以零
+
+            # 计算RSI
             rsi = 100 - (100 / (1 + rs))
 
             # 创建结果DataFrame
-            result_df = df.copy()
+            result_df = df_copy.copy()
             result_df["RSI"] = rsi
 
+            # 检测RSI金叉和死叉（相对于超买超卖线）
+            result_df["RSI_GOLDEN_CROSS"] = (
+                rsi.shift(1) <= oversold) & (rsi > oversold)
+            result_df["RSI_DEATH_CROSS"] = (
+                rsi.shift(1) >= overbought) & (rsi < overbought)
+
             # 添加超买超卖信号
-            result_df["RSI_OVERBOUGHT"] = result_df["RSI"].fillna(
-                0) > overbought
-            result_df["RSI_OVERSOLD"] = result_df["RSI"].fillna(0) < oversold
-
-            # 添加交叉中线信号
-            result_df["RSI_ABOVE_50"] = result_df["RSI"].fillna(0) > 50
-            result_df["RSI_BELOW_50"] = result_df["RSI"].fillna(0) < 50
-
-            # 添加RSI背离信号（价格新高但RSI未创新高，或价格新低但RSI未创新低）
-            price_high = price.rolling(window=period).max() == price
-            price_low = price.rolling(window=period).min() == price
-            rsi_high = rsi.rolling(window=period).max() == rsi
-            rsi_low = rsi.rolling(window=period).min() == rsi
-
-            result_df["RSI_BEARISH_DIVERGENCE"] = price_high & ~rsi_high
-            result_df["RSI_BULLISH_DIVERGENCE"] = price_low & ~rsi_low
+            result_df["RSI_OVERBOUGHT"] = rsi > overbought
+            result_df["RSI_OVERSOLD"] = rsi < oversold
 
             return result_df
 
         except Exception as e:
-            import traceback
-            logger.error(f"计算RSI指标出错: {str(e)}")
-            logger.debug(f"错误详情: {traceback.format_exc()}")
+            logger.error(f"RSI计算错误: {str(e)}")
             return df
 
     @staticmethod
-    def add_ma(df: pd.DataFrame, short: int = 5, mid: int = 20,
-               long: int = 60, column: str = "close") -> pd.DataFrame:
+    def add_ma(df: pd.DataFrame, price_col: str = "close",
+               period_short: int = 5, period_mid: int = 20,
+               period_long: int = 60) -> pd.DataFrame:
         """添加移动平均线指标
 
         Args:
-            df: 数据源DataFrame
-            short: 短期均线周期
-            mid: 中期均线周期
-            long: 长期均线周期
-            column: 计算列名，默认为close
+            df: 原始数据
+            price_col: 计算列名，默认为close
+            period_short: 短期均线周期，默认为5
+            period_mid: 中期均线周期，默认为20
+            period_long: 长期均线周期，默认为60
 
         Returns:
             pd.DataFrame: 添加了移动平均线指标的DataFrame
         """
         try:
-            # 计算移动平均线
-            result_df = df.copy()
+            # 检查价格列是否存在
+            if price_col not in df.columns:
+                logger.error(f"MA计算错误: 列 '{price_col}' 不存在于数据中")
+                return df
+
+            # 创建副本，避免警告
+            df_copy = df.copy()
+
+            # 确保价格数据完整，填充缺失值
+            price = df_copy[price_col].ffill().bfill()
+
+            # 创建结果DataFrame
+            result_df = df_copy.copy()
 
             # 短期均线
-            result_df[f"MA_{short}"] = ta.sma(df[column], length=short)
+            result_df[f"MA_{period_short}"] = price.rolling(
+                window=period_short).mean()
 
             # 中期均线
-            result_df[f"MA_{mid}"] = ta.sma(df[column], length=mid)
+            result_df[f"MA_{period_mid}"] = price.rolling(
+                window=period_mid).mean()
 
             # 长期均线
-            result_df[f"MA_{long}"] = ta.sma(df[column], length=long)
+            result_df[f"MA_{period_long}"] = price.rolling(
+                window=period_long).mean()
+
+            # 价格位置相对于均线
+            result_df["price_above_short_ma"] = price > result_df[f"MA_{period_short}"]
+            result_df["price_above_mid_ma"] = price > result_df[f"MA_{period_mid}"]
+            result_df["price_above_long_ma"] = price > result_df[f"MA_{period_long}"]
 
             # 判断短中均线交叉
+            short_ma = result_df[f"MA_{period_short}"]
+            mid_ma = result_df[f"MA_{period_mid}"]
+            long_ma = result_df[f"MA_{period_long}"]
+
             result_df["MA_short_cross_mid"] = (
-                (result_df[f"MA_{short}"].shift(1).fillna(0) < result_df[f"MA_{mid}"].shift(1).fillna(0)) &
-                (result_df[f"MA_{short}"].fillna(0)
-                 > result_df[f"MA_{mid}"].fillna(0))
+                (short_ma.shift(1) < mid_ma.shift(1)) &
+                (short_ma > mid_ma)
             )
             result_df["MA_short_dead_cross_mid"] = (
-                (result_df[f"MA_{short}"].shift(1).fillna(0) > result_df[f"MA_{mid}"].shift(1).fillna(0)) &
-                (result_df[f"MA_{short}"].fillna(0)
-                 < result_df[f"MA_{mid}"].fillna(0))
+                (short_ma.shift(1) > mid_ma.shift(1)) &
+                (short_ma < mid_ma)
             )
 
             # 判断中长均线交叉
             result_df["MA_mid_cross_long"] = (
-                (result_df[f"MA_{mid}"].shift(1).fillna(0) < result_df[f"MA_{long}"].shift(1).fillna(0)) &
-                (result_df[f"MA_{mid}"].fillna(0) >
-                 result_df[f"MA_{long}"].fillna(0))
+                (mid_ma.shift(1) < long_ma.shift(1)) &
+                (mid_ma > long_ma)
             )
             result_df["MA_mid_dead_cross_long"] = (
-                (result_df[f"MA_{mid}"].shift(1).fillna(0) > result_df[f"MA_{long}"].shift(1).fillna(0)) &
-                (result_df[f"MA_{mid}"].fillna(0) <
-                 result_df[f"MA_{long}"].fillna(0))
+                (mid_ma.shift(1) > long_ma.shift(1)) &
+                (mid_ma < long_ma)
             )
-
-            # 判断价格与均线关系
-            result_df["price_above_short_ma"] = result_df[column].fillna(
-                0) > result_df[f"MA_{short}"].fillna(0)
-            result_df["price_above_mid_ma"] = result_df[column].fillna(
-                0) > result_df[f"MA_{mid}"].fillna(0)
-            result_df["price_above_long_ma"] = result_df[column].fillna(
-                0) > result_df[f"MA_{long}"].fillna(0)
 
             return result_df
 
         except Exception as e:
-            logger.error(f"计算移动平均线指标出错: {str(e)}")
+            logger.error(f"MA计算错误: {str(e)}")
             return df
 
     @staticmethod
-    def add_volume_indicators(df: pd.DataFrame, short: int = 5,
-                              long: int = 20) -> pd.DataFrame:
+    def add_volume_indicators(df: pd.DataFrame, period_short: int = 5,
+                              period_long: int = 20) -> pd.DataFrame:
         """添加成交量指标
 
         Args:
-            df: 数据源DataFrame
-            short: 短期成交量均线周期
-            long: 长期成交量均线周期
+            df: 原始数据
+            period_short: 短期均线周期，默认为5
+            period_long: 长期均线周期，默认为20
 
         Returns:
-            pd.DataFrame: 添加了成交量指标的DataFrame
+            pd.DataFrame: 包含成交量指标的DataFrame
         """
         try:
+            # 检查必要的列是否存在
             if "volume" not in df.columns:
-                logger.warning("数据中缺少成交量数据，无法计算成交量指标")
+                logger.error(f"成交量计算错误: 列 'volume' 不存在于数据中")
                 return df
 
-            result_df = df.copy()
+            # 创建副本，避免警告
+            df_copy = df.copy()
 
-            # 计算成交量均线
-            result_df[f"VOLUME_MA_{short}"] = ta.sma(
-                df["volume"], length=short)
-            result_df[f"VOLUME_MA_{long}"] = ta.sma(df["volume"], length=long)
+            # 确保成交量数据完整，填充缺失值
+            volume = df_copy["volume"].ffill().bfill()
 
-            # 计算相对成交量
-            result_df["VOLUME_RATIO_S"] = df["volume"].fillna(0) / \
-                result_df[f"VOLUME_MA_{short}"].fillna(1)  # 防止除以0
-            result_df["VOLUME_RATIO_L"] = df["volume"].fillna(0) / \
-                result_df[f"VOLUME_MA_{long}"].fillna(1)  # 防止除以0
+            # 创建结果DataFrame
+            result_df = df_copy.copy()
+
+            # 短期成交量均线
+            result_df["VOLUME_MA_SHORT"] = volume.rolling(
+                window=period_short).mean()
+
+            # 长期成交量均线
+            result_df["VOLUME_MA_LONG"] = volume.rolling(
+                window=period_long).mean()
+
+            # 计算相对成交量（相对于长期均线）
+            result_df["VOLUME_RATIO"] = volume / \
+                result_df["VOLUME_MA_LONG"].replace(0, np.finfo(float).eps)
 
             # 判断放量
-            result_df["VOLUME_EXPAND"] = result_df["VOLUME_RATIO_L"].fillna(
-                0) > 1.5
+            # 成交量是长期均线的2倍以上
+            result_df["VOLUME_EXPAND"] = result_df["VOLUME_RATIO"] > 2.0
+            result_df["VOLUME_MILD_EXPAND"] = (result_df["VOLUME_RATIO"] > 1.5) & (
+                result_df["VOLUME_RATIO"] <= 2.0)  # 温和放量
 
-            # 判断温和放量（成交量适度放大）
-            result_df["VOLUME_MILD_EXPAND"] = (
-                (result_df["VOLUME_RATIO_L"].fillna(0) > 1.2) &
-                (result_df["VOLUME_RATIO_L"].fillna(0) < 2.0)
-            )
+            # 判断缩量
+            # 成交量不足长期均线的一半
+            result_df["VOLUME_SHRINK"] = result_df["VOLUME_RATIO"] < 0.5
+
+            # 成交量趋势
+            result_df["VOLUME_TREND_UP"] = result_df["VOLUME_MA_SHORT"] > result_df["VOLUME_MA_LONG"]
+            result_df["VOLUME_TREND_DOWN"] = result_df["VOLUME_MA_SHORT"] < result_df["VOLUME_MA_LONG"]
+
+            # 成交量波动
+            result_df["VOLUME_STD"] = volume.rolling(window=period_long).std()
+            result_df["VOLUME_STD_RATIO"] = result_df["VOLUME_STD"] / \
+                result_df["VOLUME_MA_LONG"].replace(0, np.finfo(float).eps)
+
+            # 异常成交量（超过长期均值+2倍标准差）
+            result_df["VOLUME_ANOMALY"] = volume > (
+                result_df["VOLUME_MA_LONG"] + 2 * result_df["VOLUME_STD"])
 
             return result_df
 
         except Exception as e:
-            logger.error(f"计算成交量指标出错: {str(e)}")
+            logger.error(f"成交量计算错误: {str(e)}")
             return df
 
     @staticmethod
-    def add_bollinger(df: pd.DataFrame, window: int = 20, std_dev: int = 2,
-                      price_col: str = "close") -> pd.DataFrame:
+    def add_bollinger(df: pd.DataFrame, price_col: str = "close",
+                      window: int = 20, std_dev: float = 2.0) -> pd.DataFrame:
         """添加布林带指标
 
         Args:
-            df: 数据源DataFrame
-            window: 移动窗口大小
-            std_dev: 标准差系数
-            price_col: 价格列名
+            df: 原始数据
+            price_col: 价格列名，默认为'close'
+            window: 计算周期，默认为20
+            std_dev: 标准差倍数，默认为2.0
 
         Returns:
-            pd.DataFrame: 添加了布林带指标的DataFrame
+            pd.DataFrame: 包含布林带指标的DataFrame
         """
         try:
+            # 检查价格列是否存在
             if price_col not in df.columns:
-                logger.warning(f"数据中缺少{price_col}列，无法计算布林带指标")
+                logger.error(f"布林带计算错误: 列 '{price_col}' 不存在于数据中")
                 return df
 
-            # 创建结果DataFrame
-            result_df = df.copy()
+            # 创建副本，避免警告
+            df_copy = df.copy()
 
-            # 处理价格列中的缺失值
-            price_data = result_df[price_col].fillna(
-                method='ffill').fillna(method='bfill')
+            # 确保价格数据完整，填充缺失值
+            price = df_copy[price_col].ffill().bfill()
 
-            # 检查是否仍有NaN值
-            if price_data.isna().any():
-                logger.warning(f"价格数据中存在无法填充的缺失值，无法计算布林带指标")
-                return df
-
-            # 计算移动平均线
-            middle_band = price_data.rolling(window=window).mean()
+            # 计算中轨线（简单移动平均）
+            middle_band = price.rolling(window=window).mean()
 
             # 计算标准差
-            sigma = price_data.rolling(window=window).std()
+            std = price.rolling(window=window).std()
 
-            # 计算上下轨
-            upper_band = middle_band + std_dev * sigma
-            lower_band = middle_band - std_dev * sigma
+            # 计算上轨和下轨
+            upper_band = middle_band + (std * std_dev)
+            lower_band = middle_band - (std * std_dev)
 
-            # 添加布林带指标
-            result_df["BB_MIDDLE"] = middle_band
+            # 计算宽度和带宽比率
+            bandwidth = (upper_band - lower_band) / middle_band * 100
+
+            # 计算%B指标（价格在带中的位置）
+            percent_b = (price - lower_band) / (upper_band -
+                                                lower_band).replace(0, np.finfo(float).eps)
+
+            # 创建结果DataFrame
+            result_df = df_copy.copy()
             result_df["BB_UPPER"] = upper_band
+            result_df["BB_MIDDLE"] = middle_band
             result_df["BB_LOWER"] = lower_band
+            result_df["BB_WIDTH"] = bandwidth
+            result_df["BB_PERCENT_B"] = percent_b
 
-            # 计算价格与布林带的关系
-            result_df["BB_UPPER_TOUCH"] = (
-                (result_df[price_col].shift(1).fillna(0) < result_df["BB_UPPER"].shift(1).fillna(0)) &
-                (result_df[price_col].fillna(0) >=
-                 result_df["BB_UPPER"].fillna(0))
+            # 确定价格和布林带的关系
+            result_df["BB_UPPER_TOUCH"] = price >= upper_band
+            result_df["BB_LOWER_TOUCH"] = price <= lower_band
+
+            # 检测突破
+            # 从上轨向下突破
+            result_df["BB_UPPER_BREAKOUT_DOWN"] = (
+                (price.shift(1) >= upper_band.shift(1)) &
+                (price < upper_band)
             )
 
-            result_df["BB_LOWER_TOUCH"] = (
-                (result_df[price_col].shift(1).fillna(0) > result_df["BB_LOWER"].shift(1).fillna(0)) &
-                (result_df[price_col].fillna(0) <=
-                 result_df["BB_LOWER"].fillna(0))
+            # 从下轨向上突破
+            result_df["BB_LOWER_BREAKOUT_UP"] = (
+                (price.shift(1) <= lower_band.shift(1)) &
+                (price > lower_band)
             )
 
-            result_df["BB_SQUEEZE"] = (
-                (result_df["BB_UPPER"].fillna(0) - result_df["BB_LOWER"].fillna(0)) /
-                result_df["BB_MIDDLE"].replace(0, np.finfo(
-                    float).eps).fillna(np.finfo(float).eps)
-            )
+            # 计算布林带挤压指标（当带宽低于窗口期内的2个标准差时）
+            bandwidth_std = bandwidth.rolling(window=50).std()
+            bandwidth_mean = bandwidth.rolling(window=50).mean()
+            squeeze_threshold = bandwidth_mean - (2 * bandwidth_std)
+            result_df["BB_SQUEEZE"] = bandwidth < squeeze_threshold
 
-            # 添加超买超卖判断
-            result_df["BB_OVERBOUGHT"] = result_df[price_col].fillna(
-                0) > result_df["BB_UPPER"].fillna(0)
-            result_df["BB_OVERSOLD"] = result_df[price_col].fillna(
-                0) < result_df["BB_LOWER"].fillna(0)
+            # 计算超买和超卖条件
+            result_df["BB_OVERBOUGHT"] = percent_b > 1.0  # 价格高于上轨
+            result_df["BB_OVERSOLD"] = percent_b < 0.0    # 价格低于下轨
 
-            # 计算%B指标（价格在布林带中的相对位置）
-            bb_range = result_df["BB_UPPER"] - result_df["BB_LOWER"]
-            bb_range = bb_range.replace(0, np.finfo(float).eps)  # 避免除零错误
-            result_df["BB_PERCENT_B"] = (
-                result_df[price_col] - result_df["BB_LOWER"]) / bb_range
+            # 增加波动率突变指标
+            std_ratio = std / std.rolling(window=50).mean()
+            result_df["BB_VOL_EXPANSION"] = std_ratio > 1.5  # 波动率扩大
 
             return result_df
 
         except Exception as e:
-            import traceback
-            logger.error(f"计算布林带指标出错: {str(e)}")
-            logger.debug(f"错误详情: {traceback.format_exc()}")
+            logger.error(f"布林带计算错误: {str(e)}")
             return df
 
     @staticmethod
@@ -448,77 +517,71 @@ class BasicIndicator:
         """添加KDJ指标
 
         Args:
-            df: 数据源DataFrame
-            n: 计算周期
-            m1: K值平滑系数
-            m2: D值平滑系数
+            df: 原始数据
+            n: 周期，默认为9
+            m1: K值平滑因子，默认为3
+            m2: D值平滑因子，默认为3
 
         Returns:
-            pd.DataFrame: 添加了KDJ指标的DataFrame
+            pd.DataFrame: 包含KDJ指标的DataFrame
         """
         try:
             # 检查必要的列是否存在
-            required_columns = ["high", "low", "close"]
-            missing_columns = [
-                col for col in required_columns if col not in df.columns]
-            if missing_columns:
-                logger.warning(f"数据中缺少{', '.join(missing_columns)}列，无法计算KDJ指标")
-                return df
+            required_cols = ["high", "low", "close"]
+            for col in required_cols:
+                if col not in df.columns:
+                    logger.error(f"KDJ计算错误: 列 '{col}' 不存在于数据中")
+                    return df
 
-            # 创建结果DataFrame和复制数据
-            result_df = df.copy()
+            # 创建副本，避免警告
             df_copy = df.copy()
 
-            # 填充缺失值
-            for col in required_columns:
-                df_copy[col] = df_copy[col].fillna(
-                    method='ffill').fillna(method='bfill')
+            # 确保数据完整，填充缺失值
+            for col in required_cols:
+                df_copy[col] = df_copy[col].ffill().bfill()
 
-            # 检查是否仍有NaN值
-            if df_copy[required_columns].isna().any().any():
-                logger.warning(f"价格数据中存在无法填充的缺失值，无法计算KDJ指标")
-                return df
+            # 计算RSV (Raw Stochastic Value)
+            low_n = df_copy["low"].rolling(n).min()
+            high_n = df_copy["high"].rolling(n).max()
 
-            # 手动计算KDJ
-            low_min = df_copy['low'].rolling(window=n).min()
-            high_max = df_copy['high'].rolling(window=n).max()
+            # 避免除以零
+            denominator = (high_n - low_n).replace(0, np.finfo(float).eps)
+            rsv = (df_copy["close"] - low_n) / denominator * 100
 
-            # 计算RSV，避免除零错误
-            rsv_divisor = high_max - low_min
-            rsv_divisor = rsv_divisor.replace(0, np.finfo(float).eps)
-            rsv = 100 * ((df_copy['close'] - low_min) / rsv_divisor)
-
-            # 使用EMA计算KDJ的三个值
+            # 计算K值 (默认情况下使用9天RSV的3日指数移动平均)
             k = rsv.ewm(alpha=1/m1, adjust=False).mean()
+
+            # 计算D值 (默认情况下使用K值的3日指数移动平均)
             d = k.ewm(alpha=1/m2, adjust=False).mean()
+
+            # 计算J值 (3 * K - 2 * D)
             j = 3 * k - 2 * d
 
-            # 添加KDJ指标到结果DataFrame
+            # 创建结果DataFrame
+            result_df = df_copy.copy()
             result_df["KDJ_K"] = k
             result_df["KDJ_D"] = d
             result_df["KDJ_J"] = j
 
-            # 添加金叉死叉判断
+            # KDJ金叉和死叉
             result_df["KDJ_GOLDEN_CROSS"] = (
-                (result_df["KDJ_K"].shift(1).fillna(0) <= result_df["KDJ_D"].shift(1).fillna(0)) &
-                (result_df["KDJ_K"].fillna(0) > result_df["KDJ_D"].fillna(0))
-            )
+                k.shift(1) <= d.shift(1)) & (k > d)
+            result_df["KDJ_DEATH_CROSS"] = (k.shift(1) >= d.shift(1)) & (k < d)
 
-            result_df["KDJ_DEATH_CROSS"] = (
-                (result_df["KDJ_K"].shift(1).fillna(0) >= result_df["KDJ_D"].shift(1).fillna(0)) &
-                (result_df["KDJ_K"].fillna(0) < result_df["KDJ_D"].fillna(0))
-            )
+            # KDJ超买和超卖
+            result_df["KDJ_OVERBOUGHT"] = j > 100
+            result_df["KDJ_OVERSOLD"] = j < 0
 
-            # 添加超买超卖判断
-            result_df["KDJ_OVERBOUGHT"] = result_df["KDJ_J"].fillna(0) > 100
-            result_df["KDJ_OVERSOLD"] = result_df["KDJ_J"].fillna(0) < 0
+            # 从超买区域向下突破
+            result_df["KDJ_OVERBOUGHT_EXIT"] = (j.shift(1) >= 100) & (j < 100)
+
+            # 从超卖区域向上突破
+            result_df["KDJ_OVERSOLD_EXIT"] = (j.shift(1) <= 0) & (j > 0)
 
             return result_df
 
         except Exception as e:
-            import traceback
-            logger.error(f"计算KDJ指标出错: {str(e)}")
-            logger.debug(f"错误详情: {traceback.format_exc()}")
+            logger.error(f"KDJ计算错误: {str(e)}")
             return df
 
 
