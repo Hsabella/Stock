@@ -24,7 +24,7 @@ DEFAULT_INDICATORS = {
 
 # 扫描设置
 SCAN_INTERVAL = 15 * 60  # 扫描间隔（秒），默认15分钟
-MAX_STOCKS_TO_SCAN = 100  # 最大扫描股票数量
+MAX_STOCKS_TO_SCAN = 1000  # 最大扫描股票数量
 HISTORY_DAYS = 120  # 回溯历史数据天数
 
 # 结果设置

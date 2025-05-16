@@ -173,7 +173,7 @@ class StockScanner:
             # 计算指标
             try:
                 index_data = BasicIndicator.add_ma(
-                    index_data, short=20, mid=60, long=120)
+                    index_data, period_short=20, period_mid=60, period_long=120)
             except Exception as e:
                 logger.error(f"计算指数指标失败: {str(e)}")
                 return self.market_status

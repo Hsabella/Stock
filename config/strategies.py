@@ -37,7 +37,7 @@ MACD_RSI_STRATEGY = {
     },
     "logic": "CUSTOM",  # 修改为自定义逻辑
     "custom_logic": "(macd_crossover AND rsi_oversold) OR (macd_zero_crossover AND rsi_turning_up) OR (kdj_golden_cross AND rsi_oversold)",
-    "min_score": 50,  # 降低最低分数要求（0-100）
+    "min_score": 60,  # 降低最低分数要求（0-100）
     "risk_filter": {
         "enable_trend_filter": True,  # 启用趋势过滤
         "downtrend_period": 10,       # 下跌趋势判断周期
