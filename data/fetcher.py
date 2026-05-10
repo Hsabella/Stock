@@ -453,7 +453,31 @@ class DataFetcher:
                         # 尝试最新的几个稳定接口
                         df = None
 
-                        # 尝试1: 优先使用新版东方财富接口 stock_zh_a_hist
+                        # 尝试1: 优先使用腾讯接口（东财已多次出现 IP 限流）
+                        if df is None or df.empty:
+                            try:
+                                logger.debug(
+                                    f"尝试使用stock_zh_a_hist_tx方法: symbol={symbol}")
+                                tx_symbol = symbol
+                                if symbol.startswith('6'):
+                                    tx_symbol = f"sh{symbol}"
+                                elif symbol.startswith('0') or symbol.startswith('3'):
+                                    tx_symbol = f"sz{symbol}"
+
+                                df = ak.stock_zh_a_hist_tx(
+                                    symbol=tx_symbol,
+                                    start_date=start_date_dash,
+                                    end_date=end_date_dash,
+                                    adjust=adjust if adjust else ""
+                                )
+                                if df is not None and not df.empty:
+                                    logger.debug(
+                                        f"stock_zh_a_hist_tx成功: {len(df)}行")
+                            except Exception as e1:
+                                logger.debug(
+                                    f"stock_zh_a_hist_tx失败: {str(e1)}")
+
+                        # 尝试2: 东财 stock_zh_a_hist (备用)
                         if df is None or df.empty:
                             try:
                                 logger.debug(
@@ -468,32 +492,8 @@ class DataFetcher:
                                 if df is not None and not df.empty:
                                     logger.debug(
                                         f"stock_zh_a_hist成功: {len(df)}行")
-                            except Exception as e1:
-                                logger.debug(f"stock_zh_a_hist失败: {str(e1)}")
-
-                        # 尝试2: 使用腾讯的历史数据接口
-                        if df is None or df.empty:
-                            try:
-                                logger.debug(
-                                    f"尝试使用stock_zh_a_hist_tx方法: symbol={symbol}")
-                                # 腾讯接口需要带市场前缀
-                                tx_symbol = symbol
-                                if symbol.startswith('6'):
-                                    tx_symbol = f"sh{symbol}"
-                                elif symbol.startswith('0') or symbol.startswith('3'):
-                                    tx_symbol = f"sz{symbol}"
-
-                                df = ak.stock_zh_a_hist_tx(
-                                    symbol=tx_symbol,
-                                    start_date=start_date_dash,
-                                    end_date=end_date_dash
-                                )
-                                if df is not None and not df.empty:
-                                    logger.debug(
-                                        f"stock_zh_a_hist_tx成功: {len(df)}行")
                             except Exception as e2:
-                                logger.debug(
-                                    f"stock_zh_a_hist_tx失败: {str(e2)}")
+                                logger.debug(f"stock_zh_a_hist失败: {str(e2)}")
 
                         # 尝试3: 使用东方财富分钟线接口，然后聚合
                         if df is None or df.empty and period == "daily":

@@ -244,17 +244,18 @@ class MacdRsiStrategy(StrategyBase):
         # 初始化得分为0
         score = pd.Series(0.0, index=data.index)  # 使用浮点数类型
 
-        # 1. MACD金叉： 有金叉加20分 (增加权重)
+        # 评分理念修订（基于 2025-11-25 forward 回测）：
+        # - "已涨过"特征大幅降权（连续上涨 / 多头排列 / 站上所有均线 / 零线上方）
+        # - "刚反转"特征加权（RSI 拐头 / 底背离 / 布林下轨突破 / 缩量止跌）
+        # 1. MACD金叉：反转信号，保留 20 分
         if "MACD_GOLDEN_CROSS" in data.columns:
-            # 将布尔序列转换为浮点数
             macd_golden_cross = data["MACD_GOLDEN_CROSS"].astype(float)
             score = score.add(macd_golden_cross * 20.0, fill_value=0.0)
 
-        # 2. MACD零线以上： 15分 (增加权重)
+        # 2. MACD零线以上：纯动量信号，从 15 降到 3（避免奖励"已涨过"）
         if "MACD_LINE" in data.columns:
-            # MACD值为正数，加分
             macd_positive = (data["MACD_LINE"].fillna(0) > 0).astype(float)
-            score = score.add(macd_positive * 15.0, fill_value=0.0)
+            score = score.add(macd_positive * 3.0, fill_value=0.0)
 
             # 计算MACD上穿零线的强度
             macd_prev = data["MACD_LINE"].shift(1).fillna(0)
@@ -282,7 +283,7 @@ class MacdRsiStrategy(StrategyBase):
                                 score.loc[idx] = score.loc[idx] + \
                                     normalized.loc[idx]
 
-        # 3. RSI超卖程度: 0-20分 (增加权重)
+        # 3. RSI超卖程度: 0-30分 (反转信号，从 20 提到 30)
         if "RSI" in data.columns:
             # RSI值越低，分数越高（但不包括极端异常值）
             rsi_values = data["RSI"].fillna(50)  # 使用中性值填充空值
@@ -293,7 +294,7 @@ class MacdRsiStrategy(StrategyBase):
                 # 只对超卖的数据计算分数
                 rsi_oversold_values = rsi_values[oversold_mask]
                 rsi_oversold_score = (
-                    (rsi_oversold - rsi_oversold_values) / rsi_oversold * 20.0).clip(0, 20)
+                    (rsi_oversold - rsi_oversold_values) / rsi_oversold * 30.0).clip(0, 30)
 
                 # 使用安全的加法操作
                 for idx in rsi_oversold_score.index:
@@ -301,14 +302,15 @@ class MacdRsiStrategy(StrategyBase):
                         score.loc[idx] = score.loc[idx] + \
                             rsi_oversold_score.loc[idx]
 
-        # 3.1 RSI向上拐头: 15分 (新增)
+        # 3.1 RSI向上拐头: 反转关键信号，从 15 提到 25
+        # 仅在 RSI 仍处于偏低区间（<50）时才给分，避免高位拐头被误判为反转
         if "RSI" in data.columns:
             rsi_curr = data["RSI"].fillna(0)
             rsi_prev1 = data["RSI"].shift(1).fillna(0)
             rsi_prev2 = data["RSI"].shift(2).fillna(0)
-            rsi_turning_up = (rsi_prev1 < rsi_curr) & (rsi_prev2 > rsi_prev1)
+            rsi_turning_up = (rsi_prev1 < rsi_curr) & (rsi_prev2 > rsi_prev1) & (rsi_curr < 50)
             score = score.add(rsi_turning_up.astype(float)
-                              * 15.0, fill_value=0.0)
+                              * 25.0, fill_value=0.0)
 
         # 4. 成交量确认: 0-10分
         if "VOLUME_EXPAND" in data.columns:
@@ -390,46 +392,39 @@ class MacdRsiStrategy(StrategyBase):
                 ma20 = data["MA_20"].fillna(0)
                 ma60 = data["MA_60"].fillna(0)
 
+                # 多头排列：纯动量，已涨过特征。15 → 3
                 ma_bull_aligned = (ma5 > ma10) & (ma10 > ma20) & (ma20 > ma60)
                 score = score.add(ma_bull_aligned.astype(
-                    float) * 15.0, fill_value=0.0)
+                    float) * 3.0, fill_value=0.0)
             else:
-                # 简化版多头排列 (5>20>60)
+                # 简化版多头排列：10 → 2
                 ma5 = data["MA_5"].fillna(0)
                 ma20 = data["MA_20"].fillna(0)
                 ma60 = data["MA_60"].fillna(0)
-
                 ma_bull_aligned = (ma5 > ma20) & (ma20 > ma60)
                 score = score.add(ma_bull_aligned.astype(
-                    float) * 10.0, fill_value=0.0)
+                    float) * 2.0, fill_value=0.0)
 
-            # 价格站上所有均线
+            # 站上所有均线：纯动量。10 → 2
             above_all_ma = (data["close"].fillna(
                 0) > data["MA_5"].fillna(0)).astype(bool)
             for period in [20, 60]:
                 above_all_ma = above_all_ma & (data["close"].fillna(
                     0) > data[f"MA_{period}"].fillna(0)).astype(bool)
             score = score.add(above_all_ma.astype(float)
-                              * 10.0, fill_value=0.0)
+                              * 2.0, fill_value=0.0)
 
-        # 7. 趋势持续性: 0-10分 (新增)
-        # 连续上涨（收盘价连续高于前一日）
-        if "close" in data.columns:
-            # 处理连续上涨
-            price_rising = (data["close"].fillna(
-                0) > data["close"].shift(1).fillna(0)).astype(bool)
-
-            # 连续2天上涨
-            two_days_rising = price_rising & price_rising.shift(
-                1).fillna(False).astype(bool)
-            score = score.add(two_days_rising.astype(float)
-                              * 5.0, fill_value=0.0)
-
-            # 连续3天上涨
-            three_days_rising = two_days_rising & price_rising.shift(
-                2).fillna(False).astype(bool)
-            score = score.add(three_days_rising.astype(float)
-                              * 5.0, fill_value=0.0)
+        # 7. 趋势持续性 → 已删除
+        # 旧版：连续 2/3 天上涨各 +5 分。回测发现高分股多含此项，反而 T+20 全亏。
+        # 改为：缩量止跌反弹（收阳 + 量比 < 1，反转特征）+10 分
+        if all(col in data.columns for col in ["close", "open"]):
+            green_candle = data["close"].fillna(0) > data["open"].fillna(0)
+            prev_red = data["close"].shift(1).fillna(0) < data["open"].shift(1).fillna(0)
+            shrink_volume = pd.Series(True, index=data.index)
+            if "VOLUME_RATIO" in data.columns:
+                shrink_volume = data["VOLUME_RATIO"].fillna(1) < 1.0
+            shrink_rebound = green_candle & prev_red & shrink_volume
+            score = score.add(shrink_rebound.astype(float) * 10.0, fill_value=0.0)
 
         # 8. KDJ指标评分: 0-25分 (新增)
         if all(col in data.columns for col in ["KDJ_K", "KDJ_D", "KDJ_J"]):
