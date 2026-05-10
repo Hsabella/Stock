@@ -1,0 +1,20 @@
+# 自选股 / 候选股池模板
+# 复制为 watchlist.yaml 后填入你的实盘配置（watchlist.yaml 已加入 .gitignore）
+# state: NONE / WATCHING / HELD / EXITED
+cooldown_days: 10
+default_stop_strategy: "atr_2"     # atr_2 / fixed_pct / ma20_break
+default_max_position_pct: 0.10
+
+watchlist:
+  # ===== 持仓 HELD（含成本价 + 持仓股数）=====
+  # - { symbol: "002716", name: "湖南白银", state: "HELD", position: 500, entry_price: 12.630 }
+
+  # ===== 关注 WATCHING =====
+  - { symbol: "600519", name: "贵州茅台", state: "WATCHING" }
+  - { symbol: "000333", name: "美的集团", state: "WATCHING" }
+  - { symbol: "300750", name: "宁德时代", state: "WATCHING" }
+  - { symbol: "601899", name: "紫金矿业", state: "WATCHING" }
+  - { symbol: "600887", name: "伊利股份", state: "WATCHING" }
+
+  # 带目标价（未来 STOP/TAKE 用）
+  # - { symbol: "300750", name: "宁德时代", state: "WATCHING", target_entry: [240, 250] }

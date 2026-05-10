@@ -122,3 +122,13 @@ dmypy.json
 
 # VS Code
 .vscode/
+
+# macOS
+.DS_Store
+
+# OMC 私有目录
+.omc/
+
+# 实盘持仓状态（含成本价）
+state/
+watchlist.yaml
