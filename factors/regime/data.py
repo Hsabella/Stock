@@ -19,10 +19,11 @@ def _is_fresh(p: Path, hours: int = 6) -> bool:
     return (time.time() - p.stat().st_mtime) / 3600 < hours
 
 
-def get_index_kline(symbol: str = "sh000001", days: int = 120) -> pd.DataFrame:
-    """指数日 K（默认上证）."""
+def get_index_kline(symbol: str = "sh000001", days: int = 120,
+                    force_refresh: bool = False) -> pd.DataFrame:
+    """指数日 K（默认上证）. force_refresh=True 绕过缓存."""
     p = CACHE_DIR / f"{symbol}_daily.csv"
-    if _is_fresh(p):
+    if not force_refresh and _is_fresh(p):
         try:
             return pd.read_csv(p, parse_dates=["date"])
         except Exception:
@@ -42,9 +43,9 @@ def get_index_kline(symbol: str = "sh000001", days: int = 120) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def get_csi300_kline(days: int = 120) -> pd.DataFrame:
+def get_csi300_kline(days: int = 120, force_refresh: bool = False) -> pd.DataFrame:
     """沪深 300 指数日 K，作为相对强度基准."""
-    return get_index_kline("sh000300", days=days)
+    return get_index_kline("sh000300", days=days, force_refresh=force_refresh)
 
 
 def get_sector_fund_flow_rank() -> pd.DataFrame:

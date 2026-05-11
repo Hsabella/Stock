@@ -78,6 +78,29 @@ def _build_drivers(row: dict) -> list[str]:
     rs20 = _f(row.get("stock_rs_20d"))
     if rs20 is not None and rs20 > 0.05:
         drivers.append(f"20d 跑赢沪深300 {rs20*100:+.1f}%")
+    # 板块启动信号 driver: 强调"启动"而非"涨幅", 避免追高
+    sec_rank = _f(row.get("sector_rank"))
+    sec_name = row.get("sw2_name")
+    sec_5d = _f(row.get("sector_ret_5d"))
+    sec_pos = _f(row.get("sector_pos_60d"))
+    sec_breakout = _f(row.get("sector_breakout"), 0)
+    if sec_rank is not None and sec_name and sec_rank < 0.15:
+        if sec_breakout >= 1 and sec_pos is not None and sec_pos < 0.60:
+            drivers.append(
+                f"板块 [{sec_name}] 启动信号（5d {sec_5d*100:+.1f}%, 60d 位置 {sec_pos*100:.0f}%）"
+            )
+        else:
+            drivers.append(f"板块 [{sec_name}] 综合强度前 {sec_rank*100:.0f}%")
+    # 新闻情绪 driver
+    n_direct = _f(row.get("news_direct_hits"), 0)
+    n_sector = _f(row.get("news_sector_hits"), 0)
+    n_bull = _f(row.get("news_bull_score"), 0)
+    n_bear = _f(row.get("news_bear_score"), 0)
+    n_sample = row.get("news_sample") or ""
+    if n_direct >= 1 and n_bull > n_bear:
+        drivers.append(f"近 3d 新闻命中 ({int(n_direct)} 条) 偏正面" + (f": “{n_sample}”" if n_sample else ""))
+    elif n_sector >= 3 and n_bull > n_bear + 1:
+        drivers.append(f"板块新闻偏正面（{int(n_sector)} 条命中）")
     chips_con = _f(row.get("chips_concentration"))
     if chips_con is not None and chips_con < 0.15:
         drivers.append(f"筹码集中（90% 区间宽度 {chips_con*100:.1f}%）")
@@ -98,6 +121,26 @@ def _build_risks(row: dict) -> list[str]:
     pe = _f(row.get("pe_ttm"))
     if pe is not None and pe > 80:
         risks.append(f"PE_TTM={pe:.0f}（估值偏高）")
+    sec_rank = _f(row.get("sector_rank"))
+    sec_name = row.get("sw2_name")
+    sec_rsi = _f(row.get("sector_rsi"))
+    sec_pos = _f(row.get("sector_pos_60d"))
+    if sec_rsi is not None and sec_rsi > 70:
+        risks.append(f"板块 [{sec_name or '?'}] 过热 RSI={sec_rsi:.0f}（追高风险）")
+    elif sec_pos is not None and sec_pos > 0.90:
+        risks.append(f"板块 [{sec_name or '?'}] 已在 60d 高位 {sec_pos*100:.0f}%")
+    elif sec_rank is not None and sec_name and sec_rank > 0.75:
+        risks.append(f"板块 [{sec_name}] 弱势（全市场后 {(1-sec_rank)*100:.0f}%）")
+    # 新闻负面/事件
+    n_direct = _f(row.get("news_direct_hits"), 0)
+    n_bull = _f(row.get("news_bull_score"), 0)
+    n_bear = _f(row.get("news_bear_score"), 0)
+    n_events_raw = row.get("news_events")
+    if isinstance(n_events_raw, list) and n_events_raw:
+        risks.append("⚠ 新闻事件: " + " / ".join(n_events_raw[:3]))
+    elif n_direct >= 1 and n_bear > n_bull:
+        sample = row.get("news_sample") or ""
+        risks.append(f"近 3d 新闻偏负面" + (f": “{sample}”" if sample else ""))
     return risks
 
 

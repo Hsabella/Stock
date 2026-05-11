@@ -27,6 +27,9 @@ from factors.technical import dim as tech_dim
 from factors.chips import dim as chips_dim
 from factors.regime import dim as regime_dim
 from factors.regime.data import get_csi300_kline, get_north_total_inflow
+from factors.sector_momentum import dim as sector_dim
+from factors.news import dim as news_dim
+from factors.news.data import get_news_recent
 from factors._kline import get_kline
 from engine.decision_resolver import resolve_batch
 from engine.state_machine import load_positions, effective_state
@@ -150,6 +153,41 @@ def main():
             print(f"  {it['symbol']} regime error: {e}")
     regime_df = regime_dim.compose_dim(regime_rows, regime=index_regime, north_pos=north_pos)
 
+    # ---- 板块动量 (SW2) ----
+    print("\n[compute] sector_momentum_dim ...")
+    csi_5d_ret = None
+    if not csi.empty and len(csi) > 6:
+        csi_5d_ret = float(csi["close"].iloc[-1] / csi["close"].iloc[-6] - 1)
+    sector_scores = sector_dim.compute_sector_scores(csi_5d_ret)
+    print(f"  打分板块数: {len(sector_scores)}")
+    if not sector_scores.empty:
+        top5 = sector_scores.head(8)[["name", "ret_5d", "ret_30d", "pos_60d",
+                                       "sector_rsi", "breakout_flag", "sector_rank"]]
+        print("  TOP 8 启动信号板块（高 breakout/低位/未过热）:")
+        print(top5.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+    sector_df = sector_dim.map_to_symbols([it["symbol"] for it in items], sector_scores)
+
+    # ---- 新闻情绪 ----
+    print("\n[compute] news_dim ...")
+    news_df = get_news_recent(days=3, refresh=True)
+    sw2_lookup = dict(zip(sector_df["symbol"], sector_df["sw2_name"]))
+    news_rows = []
+    for it in items:
+        sw2 = sw2_lookup.get(it["symbol"])
+        try:
+            news_rows.append(news_dim.compute_one(it["symbol"], it["name"], sw2, news_df))
+        except Exception as e:
+            print(f"  {it['symbol']} news error: {e}")
+    news_out = news_dim.compose_dim(news_rows)
+    if not news_out.empty:
+        hits = news_out[(news_out["news_direct_hits"] + news_out["news_sector_hits"]) > 0]
+        print(f"  命中新闻的股票: {len(hits)}/{len(news_out)}")
+        risk_hits = news_out[news_out["news_risk_tags"].apply(lambda t: bool(t))]
+        if not risk_hits.empty:
+            print(f"  ⚠ 触发风险事件: {len(risk_hits)} 只")
+            for _, r in risk_hits.iterrows():
+                print(f"    {r['symbol']}: {r['news_events']}")
+
     # ---- 合并 ----
     keep_f = ["symbol", "name", "sector", "pe_ttm", "pe_self_percentile",
               "pe_sector_percentile", "roe_ttm", "veto_hit", "fundamental_rank"]
@@ -161,26 +199,37 @@ def main():
               "obv_strength", "tech_raw", "tech_rank"]
     keep_c = ["symbol", "chips_concentration", "cost_deviation", "chips_rank"]
     keep_r = ["symbol", "stock_rs_20d", "stock_rs_60d", "regime_rank", "index_regime"]
+    keep_s = ["symbol", "sw2_code", "sw2_name", "sector_ret_5d", "sector_ret_30d",
+              "sector_pos_60d", "sector_rsi", "sector_breakout", "sector_rank"]
+    keep_n = ["symbol", "news_direct_hits", "news_sector_hits", "news_bull_score",
+              "news_bear_score", "news_events", "news_sample", "news_risk_tags", "news_rank"]
 
     out_df = (fund_df[keep_f]
               .merge(flow_df[keep_g], on="symbol", how="left")
               .merge(liq_df[keep_l], on="symbol", how="left")
               .merge(tech_df[keep_t], on="symbol", how="left")
               .merge(chips_df[keep_c], on="symbol", how="left")
-              .merge(regime_df[keep_r], on="symbol", how="left"))
+              .merge(regime_df[keep_r], on="symbol", how="left")
+              .merge(sector_df[keep_s], on="symbol", how="left")
+              .merge(news_out[keep_n] if not news_out.empty
+                     else pd.DataFrame({c: [] for c in keep_n}),
+                     on="symbol", how="left"))
 
-    # 风险标签合并
+    # 风险标签合并 (含新闻事件)
     risk_map = {}
     for r in (liq_rows + tech_rows):
         risk_map.setdefault(r["symbol"], []).extend(r.get("risk_tags") or [])
     for r in fund_rows:
         risk_map.setdefault(r["symbol"], []).extend(r.get("risk_tags") or [])
+    for r in news_rows:
+        risk_map.setdefault(r["symbol"], []).extend(r.get("news_risk_tags") or [])
     out_df["risk_tags"] = out_df["symbol"].map(lambda s: ";".join(sorted(set(risk_map.get(s, [])))))
 
-    # ---- partial composite (6 维归一化, 缺 market_action + news) ----
-    weights = {"fundamental_rank": 0.30, "fund_flow_rank": 0.25,
-               "liquidity_rank": 0.15, "chips_rank": 0.10,
-               "regime_rank": 0.08, "tech_rank": 0.05}
+    # ---- composite (8 维归一化, 完整版) ----
+    weights = {"fundamental_rank": 0.22, "fund_flow_rank": 0.18,
+               "liquidity_rank": 0.12, "chips_rank": 0.08,
+               "regime_rank": 0.07, "tech_rank": 0.05,
+               "sector_rank": 0.18, "news_rank": 0.10}
     total_w = sum(weights.values())
     score = pd.Series(0.0, index=out_df.index)
     for col, w in weights.items():
@@ -207,8 +256,9 @@ def main():
     # 摘要表
     summary_cols = ["symbol", "name", "state", "decision", "confidence",
                     "fundamental_rank", "fund_flow_rank", "liquidity_rank",
-                    "chips_rank", "regime_rank", "tech_rank", "risk_tags"]
-    print("\n========= 决策摘要（6 维 + state machine） =========")
+                    "chips_rank", "regime_rank", "tech_rank", "sector_rank",
+                    "news_rank", "sw2_name", "risk_tags"]
+    print("\n========= 决策摘要（8 维完整版） =========")
     print(decided[summary_cols].to_string(index=False, float_format=lambda x: f"{x:.3f}"))
 
     # 决策计数
@@ -235,8 +285,10 @@ def main():
                 "composite": round(float(r["composite"]), 3),
                 "ranks": {k.replace("_rank", ""): round(float(r[k]), 3)
                           for k in ("fundamental_rank", "fund_flow_rank", "liquidity_rank",
-                                    "chips_rank", "regime_rank", "tech_rank")
+                                    "chips_rank", "regime_rank", "tech_rank",
+                                    "sector_rank", "news_rank")
                           if pd.notna(r.get(k))},
+                "sector": (r.get("sw2_name") if pd.notna(r.get("sw2_name")) else None),
                 "drivers": r["dec_drivers"],
                 "risks": r["dec_risks"],
                 "gates_failed": r["dec_gates_failed"],
