@@ -29,12 +29,15 @@ def _sina_symbol(symbol: str) -> str:
     return f"sh{symbol}" if symbol.startswith("6") else f"sz{symbol}"
 
 
-def get_kline(symbol: str, days: int = 250, adjust: str = "qfq") -> pd.DataFrame:
+def get_kline(symbol: str, days: int = 250, adjust: str = "qfq",
+              force_refresh: bool = False) -> pd.DataFrame:
     """日线 K 线（前复权）, 列: date / open / high / low / close / volume / amount /
     outstanding_share / turnover (单位: %).
+
+    force_refresh=True 时绕过缓存重拉 (forward 校验当天用).
     """
     p = CACHE_DIR / f"{symbol}_daily_{adjust}.csv"
-    if _is_fresh(p):
+    if not force_refresh and _is_fresh(p):
         try:
             df = pd.read_csv(p, parse_dates=["date"])
             return df.tail(days).reset_index(drop=True)
