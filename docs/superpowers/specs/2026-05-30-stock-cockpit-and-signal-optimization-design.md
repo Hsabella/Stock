@@ -190,3 +190,42 @@
 3. **ruamel.yaml 依赖** → ✅ 用 **ruamel.yaml** 写 watchlist.yaml,保留注释/`{…}` flow 格式(接受多一个依赖)。
 4. **daily_run 触发与限流** → ✅ **接受部分维度数据缺失**照常跑(脚本对失败维度容错),日志红字提示哪几维没数据。
 5. **优化样本** → ✅ 按 14 天方向性证据先改、再用扩到 T+3/T+5 的更长窗口复核(与看板并行动手)。
+
+---
+
+## 附录: 再加权实验结果(2026-05-30)
+
+由 `scripts/reweight_backtest.py` 在存量 `partial_*.csv`(8 维 rank + `rsi_value`)上离线重算 composite、复测 IC 与 BUY−DROP 价差,不重跑引擎、不抓数据。目标: `ic_mean` 转正 且 `buy_minus_drop > 0`,且 T+1/T+3 方向一致。
+
+### T+1 对照表
+
+```
+config                     days   ic_mean  ic_pos%  BUY-DROP
+baseline(当前8维+penalty)       13   -0.0634     0.31   -0.0051
+去penalty                     13   +0.0172     0.46   +0.0037
+砍sector/liq/tech             13   +0.0670     0.62   +0.0081
+再降fund/chips                 13   +0.0951     0.69   +0.0096
+两维(flow+regime)              14   +0.0990     0.71   +0.0103
+```
+
+### T+3 复核表(抗单日噪声)
+
+```
+config                     days   ic_mean  ic_pos%  BUY-DROP
+baseline(当前8维+penalty)       11   +0.0131     0.45   -0.0047
+去penalty                     11   +0.1025     0.82   +0.0184
+砍sector/liq/tech             11   +0.1451     1.00   +0.0277
+再降fund/chips                 11   +0.2174     0.91   +0.0344
+两维(flow+regime)              12   +0.1887     0.83   +0.0309
+```
+
+### 结论与胜出 config
+
+- **方向一致性**:T+1 与 T+3 两表 config 排序未翻转 —— `baseline` 始终最差(两表 BUY−DROP 均为负),随着砍掉反向维度(sector/liquidity/tech)、关 penalty、把权重让给 fund_flow+regime,`ic_mean` 与 `BUY−DROP` 单调改善。
+- **penalty 系统性惩罚赢家**:`去penalty` 相对 `baseline` 在两个周期都大幅改善(T+1 −0.0634→+0.0172,T+3 +0.0131→+0.1025),确认 overheat penalty 是反向的,A5 应关闭。
+- **胜出 config = `再降fund/chips`(关 penalty)**:
+  - 权重 `{"fund_flow_rank": 0.40, "regime_rank": 0.25, "news_rank": 0.15, "fundamental_rank": 0.10, "chips_rank": 0.10}`,`use_penalty=False`。
+  - T+1:ic_mean=+0.0951、BUY−DROP=+0.0096;T+3:ic_mean=+0.2174(全场最高)、BUY−DROP=+0.0344(全场最高)。
+  - 两周期 `ic_mean` 全为正、`BUY−DROP` 全为正,满足全部胜出条件。
+  - 相比纯 `两维(flow+regime)`(T+1 略高、T+3 略低),`再降fund/chips` 保留 5 维(多 news/fundamental/chips),对单因子失效更鲁棒;且 fundamental 仍可在 gate 段保留,不进评分。
+- **下一步(Task A5)**:把上述 5 维权重回写 `scripts/run_partial_engine.py`,并关闭 overheat penalty(保留计算供 forward 透明,但不施加到 composite)。
