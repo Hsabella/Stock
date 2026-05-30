@@ -7,18 +7,17 @@
 
 ## 一句话理解
 
-每天收盘后，把你 watchlist 里的股票从 8 个维度做横截面打分：
+每天收盘后，把你 watchlist 里的股票做横截面打分。引擎仍**计算全部 8 个维度**（报告里都显示 rank），但 2026-05 再加权后 **composite 综合评分只用下面 5 个维度**（依据 14 天 forward 实测的逐因子 IC）：
 
-| 维度 | 权重 | 看什么 |
+| 维度 | composite 权重 | 看什么 |
 |---|---|---|
-| fundamental | 0.22 | PE/PB 自身+行业分位、ROE、Hard Veto |
-| fund_flow | 0.18 | 主力 3/5 日净流入、北向持仓、龙虎榜 |
-| sector_momentum | 0.18 | 申万二级板块**启动信号**（反追高） |
-| liquidity | 0.12 | 量比 + 换手率拐点 |
-| news | 0.10 | 多源新闻流命中 + 利好/利空词典 + 风险事件 |
-| chips | 0.08 | 90% 筹码区间、当前价相对成本均价 |
-| regime | 0.07 | 大盘趋势 + 个股 vs 沪深 300 |
-| technical | 0.05 | RSI/MACD/OBV 拐点 |
+| fund_flow | **0.40** | 主力 3/5 日净流入、北向持仓、龙虎榜（实测最有效，IC≈+0.064）|
+| regime | **0.25** | 大盘趋势 + 个股 vs 沪深300 相对强度（实测有效）|
+| news | 0.15 | 多源新闻流命中 + 利好/利空词典 + 风险事件 |
+| fundamental | 0.10 | PE/PB 分位、ROE；**主要作 gate 硬门槛**，评分占比已下调 |
+| chips | 0.10 | 90% 筹码区间、当前价相对成本均价 |
+
+> ⚠️ 已从 composite 评分**剔除**（权重 0，但仍计算并在报告显示 rank）：`sector_momentum`、`liquidity`、`technical` —— 2026-05 forward 实测它们对 T+1 收益**反向**（sector IC≈−0.13、liquidity≈−0.06、tech≈−0.03），“接飞刀/反追高”逻辑在动量行情里做反了。同时 **overheat penalty 已停用**。再加权后 composite IC：−0.097 → +0.095(T+1) / +0.217(T+3)。
 
 按你的持仓状态（NONE/WATCHING/HELD）输出 **BUY / HOLD / REDUCE / STOP** 等动作建议，附带 3-5 条人话理由和风险提示。
 
@@ -81,17 +80,17 @@ python3 scripts/forward_check.py --refresh # 前一份决策 vs 今日实际
 
 ---
 
-## 反追高设计 ⚠️
+## 反追高设计 ⚠️（2026-05 重大修订）
 
-本引擎在两个层面对"追高"做了显式抑制（见 `feedback_anti_chasing_high.md`）：
+原引擎在多个层面做"反追高/抄超卖"——个股 overheat_penalty（RSI>70 打折）、板块只奖励低位启动、technical 奖励 RSI 超卖反转。**但 14 天 forward 实测发现：在当前动量行情里这些逻辑全部做反了**——被惩罚的高 RSI 动量股反而上涨、被奖励的超卖票继续下跌，导致 composite 的信息系数 IC 为负（高分股反而跌）。
 
-1. **个股 overheat_penalty**: RSI > 70 → composite × 0.5，RSI > 85 时直接 ×0.5
-2. **板块启动信号**:
-   - 板块 5d 涨但 60d 位置已超 70% → **不算启动**，不加分
-   - 板块 RSI > 70 → **过热惩罚**，扣分
-   - "连涨天数"**已从因子中移除**（避免接最后一棒）
+因此 2026-05 做了再加权修订：
 
-所以 BUY 列表不会把"已经涨完"的标的推到前面，但**也不能预测当天的事件冲击**（如运价骤跌）。
+1. **overheat penalty 停用**（仍计算 `overheat_penalty` 列供观察，但不再施加到 composite）。
+2. **sector_momentum / liquidity / technical 移出 composite 评分**（权重 0），评分改由 fund_flow + regime 主导。
+3. 用 `scripts/reweight_backtest.py` 在存量数据上离线复测每套权重的 IC，选 IC 转正的方案。
+
+> 现在的"防接飞刀"主要靠 **fundamental Hard Veto + 三道 gates**（仍在），而非过热惩罚。真正的验收看驾驶舱"因子体检/Forward兑现"页：composite IC 是否持续为正、BUY 是否跑赢 DROP。
 
 ---
 
@@ -133,6 +132,25 @@ python3 scripts/forward_check.py --decision 20260510 --horizons 1 3 5 --refresh
 
 ---
 
+## 驾驶舱（可视化看板）
+
+收盘后不用翻 markdown，开个网页看：
+
+```bash
+pip install -r dashboard/requirements.txt   # 首次：streamlit + ruamel.yaml
+streamlit run dashboard/app.py              # 浏览器开 http://localhost:8501
+```
+
+4 个标签页：
+- **今日决策** — 任一天决策 + 8 维 rank 色阶 + drivers/risks
+- **Forward 兑现** — 决策的 T+1/T+3/T+5 真实兑现、BUY−DROP 价差、沪深300 基准
+- **因子体检** — 逐因子 IC（哪个维度有预测力/反向）、IC 时间序列
+- **控制台** — 网页编辑 watchlist（自动备份）、一键 daily_run
+
+> 纯只读 `results/`，写操作仅改 `watchlist.yaml`，**非交易系统**。
+
+---
+
 ## 项目结构
 
 ```
@@ -153,11 +171,18 @@ Stock/
 │   └── state_machine.py      # 状态转移
 ├── scripts/
 │   ├── daily_run.sh              # 一键全套（cron 入口）
-│   ├── run_partial_engine.py     # 8 维主引擎
+│   ├── run_partial_engine.py     # 主引擎（8 维计算，composite 再加权后用 5 维）
+│   ├── reweight_backtest.py      # 离线再加权回测（选最优权重，不抓数据）
 │   ├── fetch_news_only.py        # 仅累积新闻（盘中小时跑）
 │   ├── forward_check.py          # T+N 真实收益对照
 │   ├── generate_report.py        # markdown 报告
 │   └── backtest_composite_week.py # 历史 anchor 回测
+├── compute_factor_ic.py     # 逐因子 IC → results/factor_ic.csv
+├── dashboard/               # Streamlit 驾驶舱（streamlit run dashboard/app.py）
+│   ├── app.py                  # 4 标签页：今日决策/Forward兑现/因子体检/控制台
+│   ├── data_loader.py          # 只读数据层
+│   ├── metrics.py              # 纯函数聚合
+│   └── controls.py             # watchlist 保存 + 一键 daily_run
 ├── watchlist.yaml        # 自选股池（手动维护）
 ├── state/positions.json  # cooldown 跟踪（自动）
 ├── cache/                # 数据缓存（自动）
@@ -167,7 +192,8 @@ Stock/
 │   └── ...
 ├── results/
 │   ├── decisions/        # 每日决策 csv/json/md
-│   └── forward/          # 每日 forward 校验
+│   ├── forward/          # 每日 forward 校验
+│   └── factor_ic.csv     # 逐因子 IC 时间序列（驾驶舱用）
 └── logs/                 # cron + 手动跑的日志
 ```
 

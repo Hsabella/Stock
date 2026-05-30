@@ -31,7 +31,9 @@
 
 ---
 
-## 二、6 个维度
+## 二、8 个维度（composite 评分用 5 维）
+
+> 引擎计算全部 8 维并在报告里显示 rank；2026-05 再加权后 composite 评分只用 fund_flow / regime / news / fundamental / chips 这 5 维，sector_momentum / liquidity / technical 权重置 0（实测对 T+1 反向）。
 
 ### 1. fundamental_dim（基本面）
 **评估什么**：这家公司值不值钱、赚不赚钱
@@ -115,6 +117,29 @@
 | **stock_rs_20d** | 个股 20 日涨跌幅 − 沪深300 同期涨跌幅（**>0 = 跑赢大盘**）|
 | **沪深300** | 沪深两市市值最大的 300 只票，A 股最重要基准指数 |
 
+### 7. sector_momentum_dim（板块动量，申万二级）⚠️ composite 权重已置 0
+**评估什么**：个股所属申万二级板块是不是在"启动"
+
+| 术语 | 含义 |
+|---|---|
+| **SW2 / 申万二级** | 申银万国二级行业分类（如"小金属""半导体"）|
+| **sector_pos_60d** | 板块指数当前价在过去 60 日的位置分位（0=最低，1=最高）|
+| **sector_breakout** | 板块启动信号：5 日涨 + 仍在低位（pos_60d<0.70）|
+| **sector_rsi** | 板块指数 RSI（>70 算板块过热）|
+
+> ⚠️ 2026-05 实测 `sector_rank` 对 T+1 收益 IC≈−0.13（最强反向），已移出 composite 评分（仍计算并显示 rank）。
+
+### 8. news_dim（新闻流）composite 权重 0.15
+**评估什么**：近 3 天多源新闻有没有命中利好/利空/风险事件
+
+| 术语 | 含义 |
+|---|---|
+| **BULLISH_KW / BEARISH_KW** | 利好/利空关键词词典（中标/订单/减持/预亏…）|
+| **RISK_EVENT_KW** | 风险事件词：减持/解禁/立案/退市 |
+| **news_rank** | 新闻情绪综合排名（命中利好靠前；风险事件强压到后）|
+
+> 关键词词典法，不依赖 NLP；词典在 `factors/news/dim.py`。
+
 ---
 
 ## 三、决策算法
@@ -123,11 +148,12 @@
 |---|---|
 | **横截面 rank** | 同一天里把 N 只股票按某指标排队，转成 0~1 分位。**0=最强，1=最弱** |
 | **z-score** | 标准化值 = (x − 均值) / 标准差。常用于把不同量纲指标拉到同一尺度 |
-| **composite** | 综合得分 = 各维 (1−rank) × 权重 之和，归一化到 0~1。**越大越优** |
-| **partial_composite** | 部分维度合成（当前 6 维，未凑齐 8 维时叫 partial）|
+| **composite** | 综合得分 = 各维 (1−rank) × 权重 之和，归一化到 0~1。**越大越优**。2026-05 再加权后只用 5 维（fund_flow .40 / regime .25 / news .15 / fundamental .10 / chips .10），sector/liquidity/tech 权重置 0 |
+| **partial_composite** | 引擎实际输出的 composite 列名（历史遗留命名，等同 composite）|
+| **再加权 / reweight** | 用 `scripts/reweight_backtest.py` 在存量 partial 数据上离线重算 composite、复测 IC，挑 IC 转正的权重方案，不重跑引擎、不抓数据 |
 | **gates** | 最低门槛三道：fund_rank≤60% / flow_rank≤60% / liq_rank≤70%。任一不过则不能 BUY |
 | **BUY 阈值** | composite ≥ 0.55 才能 BUY；[0.45, 0.55) → CONTINUE_WATCH；< 0.45 → DROP |
-| **overheat_penalty** | 过热降权：RSI>70 时 composite 打折，RSI<25 也打折（防接飞刀）|
+| **overheat_penalty** | 过热降权：RSI>70/RSI<25 打折。**2026-05 已停用**（实测它在惩罚真正在涨的赢家），仍计算该列供观察但不施加到 composite |
 | **veto_hit** | 基本面硬否决命中标志（True 时 composite 强制为 0） |
 
 ---
