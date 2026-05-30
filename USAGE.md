@@ -32,7 +32,7 @@
 
 ```
 0 10,11,13,14,15 * * 1-5  fetch_news_only.py    # 盘中每小时累积新闻样本
-30 15            * * 1-5  daily_run.sh          # 收盘后跑决策 + forward 对照
+30 18            * * 1-5  daily_run.sh          # 盘后 18:30 跑决策 + forward 对照 (此时新闻/资金流数据已稳定)
 ```
 
 第二天起床看 `results/decisions/partial_<昨日>.md` + `results/forward/forward_<前日>.md`。
