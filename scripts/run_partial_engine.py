@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""部分决策引擎: fundamental + fund_flow + liquidity + technical 四维, 输出 partial_composite.
+"""部分决策引擎: 多维 rank 加权, 输出 partial_composite.
 
-权重（spec 完整 8 维归一化后）:
-- fundamental 0.30 / fund_flow 0.25 / liquidity 0.15 / technical 0.05
-- 归一化分母 = 0.75
+composite 权重见 build 段(约 228 行)。2026-05-30 经 reweight_backtest 实验再加权:
+砍掉反向维度 sector/liquidity/tech, 关闭 overheat penalty(详见 specs 附录)。
+历史 4 维/8 维旧权重注释已删, 以代码为准。
 partial_composite = Σ wi * (1 - rank_i) / Σ wi
 
 用法:
@@ -225,11 +225,12 @@ def main():
         risk_map.setdefault(r["symbol"], []).extend(r.get("news_risk_tags") or [])
     out_df["risk_tags"] = out_df["symbol"].map(lambda s: ";".join(sorted(set(risk_map.get(s, [])))))
 
-    # ---- composite (8 维归一化, 完整版) ----
-    weights = {"fundamental_rank": 0.22, "fund_flow_rank": 0.18,
-               "liquidity_rank": 0.12, "chips_rank": 0.08,
-               "regime_rank": 0.07, "tech_rank": 0.05,
-               "sector_rank": 0.18, "news_rank": 0.10}
+    # ---- composite (再加权: 砍掉反向维度 sector/liquidity/tech) ----
+    # 2026-05-30 reweight_backtest 胜出 config(见 specs 附录):
+    # T+1 IC -0.097→+0.095, T+3 IC +0.217; BUY-DROP 两周期均转正.
+    # fundamental 仍保留在 decision_resolver 的 gate, 仅不再主导 composite 评分.
+    weights = {"fund_flow_rank": 0.40, "regime_rank": 0.25,
+               "news_rank": 0.15, "fundamental_rank": 0.10, "chips_rank": 0.10}
     total_w = sum(weights.values())
     score = pd.Series(0.0, index=out_df.index)
     for col, w in weights.items():
@@ -244,8 +245,10 @@ def main():
     # RSI <25 且 7 日内创新低 = 接飞刀，0.6× 降权（用 tech_raw=0 + RSI 极低代理）
     extreme_oversold = ((25 - rsi) / 10).clip(0, 1).fillna(0) * 0.4
     penalty = (0.5 * overheat + extreme_oversold).clip(0, 0.7)
-    out_df["overheat_penalty"] = penalty
-    out_df["partial_composite"] = out_df["partial_composite_raw"] * (1 - penalty)
+    out_df["overheat_penalty"] = penalty  # 仍写出供 forward/看板透明观察
+    # 2026-05-30: penalty 经 reweight 实验证实系统性惩罚赢家(spearman(penalty,ret)=+0.107),
+    # 暂停施加 —— 关 penalty 后 T+1 IC -0.063→+0.017, T+3 +0.013→+0.103.
+    out_df["partial_composite"] = out_df["partial_composite_raw"]
     out_df.loc[out_df["veto_hit"] == True, "partial_composite"] = 0.0
 
     out_df = out_df.sort_values("partial_composite", ascending=False).reset_index(drop=True)
