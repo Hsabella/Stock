@@ -1,0 +1,22 @@
+# quant 数据层配置（路径统一在这里改，代码不写死）
+qlib:
+  # chenditc/investment_data 标准落盘位置，项目外、不进 git
+  provider_uri: ~/.qlib/qlib_data/cn_data
+  region: cn
+
+download:
+  release_url: https://github.com/chenditc/investment_data/releases/latest/download/qlib_bin.tar.gz
+  archive_path: ~/.qlib/downloads/qlib_bin.tar.gz
+
+universe:
+  # 三大指数成分股并集；csi1000 若历史缺失可临时从列表移除降级
+  indexes: [csi300, csi500, csi1000]
+  output_name: csi_union
+  # 上市不足 N 个交易日的区间掐头（次新过滤）
+  min_listed_days: 120
+  # 剔除当前名称含 ST 的股票（历史 ST 状态拿不到 point-in-time，见 docs/quant/data_dictionary.md 局限说明）
+  exclude_st: true
+  st_cache: ~/.qlib/quant_warehouse/st_codes.csv
+
+warehouse:
+  path: ~/.qlib/quant_warehouse

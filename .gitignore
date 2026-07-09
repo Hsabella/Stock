@@ -132,3 +132,4 @@ dmypy.json
 # 实盘持仓状态（含成本价）
 state/
 watchlist.yaml
+.venv-quant/
