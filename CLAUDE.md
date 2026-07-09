@@ -2,6 +2,31 @@
 
 A 股自选股决策引擎：收盘后从 8 个维度给 watchlist 打分 + 状态机出 BUY/HOLD/REDUCE/STOP 建议，**非自动交易系统**（最终下单由人拍板）。详细用法看 [USAGE.md](./USAGE.md)，术语看 [GLOSSARY.md](./GLOSSARY.md)。
 
+> **2026-07 重构（quant/ 新系统）**：watchlist 打分器收益已证伪（38 天全样本 BUY 组合 -11.9% 跑输自选池），项目重构为 qlib 量化系统，见下方 quant 段落与 [docs/quant/phase1_report.md](./docs/quant/phase1_report.md)。旧引擎照跑到二期切换。
+
+## quant/ 新系统（qlib 重构，第一期已完成）
+
+```bash
+# 全部用独立 venv: .venv-quant（pyqlib+lightgbm+akshare）
+.venv-quant/bin/python -m quant.data.bootstrap        # 更新 qlib 数据包(chenditc, 日更)
+.venv-quant/bin/python -m quant.data.universe          # 重建 PIT 股票池 csi_union(~1800只)
+.venv-quant/bin/python -m quant.data.checks            # 数据质检(每次更新必跑)
+.venv-quant/bin/python -m quant.data.akshare_fetcher --dataset em_fundflow  # 资金流滚动累积(每周)
+.venv-quant/bin/python -m quant.features.ext_features  # 重建扩展特征 parquet
+.venv-quant/bin/python -m quant.research.ic_report     # 单因子周频 IC 体检
+.venv-quant/bin/python -m quant.model.baseline --model lgb --mode rolling   # 滚动训练
+.venv-quant/bin/python -m quant.backtest.run_backtest --pred results/quant/pred_lgb_rolling.parquet --start 2023-01-04
+.venv-quant/bin/python -m quant.backtest.overlay --daily results/quant/bt_lgb_rolling_daily.csv  # 择时叠加
+.venv-quant/bin/python -m quant.research.evaluate      # 验收 go/no-go 报告
+.venv-quant/bin/python -m pytest tests/quant/ -q
+```
+
+关键事实：股票池=300+500+1000 成分 PIT 并集；周度调仓 open-to-open；成本足额建模；
+所有评估 2023 起全样本外（walk-forward）。**第一期结论 NO-GO(as-is)**：IC +0.056 达标但
+纯多头超额 -2.2% 未达标，迭代方向见 phase1_report（首选行业/市值中性化）。
+数据在 `~/.qlib/`（bin 包 + quant_warehouse parquet），不进 git；**东财资金流仅 120 天
+历史，需每周跑 fetcher 累积**；macOS 下 qlib 大面板调用必须有 `__main__` 保护。
+
 ## 常用命令
 
 ```bash
