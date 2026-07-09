@@ -1,0 +1,51 @@
+# 模型训练与组合回测配置（M3）
+segments:
+  train: ["2018-06-01", "2022-12-31"]   # 因子最长窗 120 日，起点留出 warmup
+  valid: ["2023-01-01", "2023-12-31"]
+  test: ["2024-01-01", "2026-06-30"]
+
+rolling:
+  # 滚动 walk-forward：训练窗 750 交易日，每 63 交易日（约一季度）滚一步，
+  # 从 out_start 起产出的预测全部为样本外
+  train_days: 750
+  step_days: 63
+  out_start: "2023-01-01"
+  out_end: "2026-06-30"
+
+model:
+  lgb:
+    loss: mse
+    learning_rate: 0.05
+    max_depth: 8
+    num_leaves: 64
+    colsample_bytree: 0.8
+    subsample: 0.8
+    lambda_l1: 10
+    lambda_l2: 10
+    num_boost_round: 500
+    early_stopping_rounds: 50
+
+strategy:
+  topk: 30
+  n_drop: 8
+  risk_degree: 0.95        # 常态仓位上限，择时层（M4）在此之上再打折
+
+timing:
+  # 择时层基础版（M4）：全部用 T 日开盘前可得信息
+  ma_days: 200            # 沪深300 收盘(T-1) vs MA200(T-1)
+  spx_threshold: -0.015   # 隔夜标普500 跌幅 ≤ -1.5% 触发 risk_off
+  confirm_days: 2         # 状态切换需连续 N 日确认（防 MA 附近来回打脸）
+  exposure_off: 0.5       # risk_off 时仓位系数（敏感性再测 0.3/0.7）
+  overlay_cost: 0.001     # |Δexposure| 的近似调仓成本
+
+backtest:
+  start: "2024-01-02"
+  end: "2026-06-30"
+  account: 1000000
+  benchmark: SH000906       # 中证800
+  exchange:
+    limit_threshold: 0.095  # 涨跌停不可成交（主板 10% 留 buffer）
+    deal_price: open        # T-1 收盘出信号 → T 日开盘价成交
+    open_cost: 0.0005       # 买入佣金
+    close_cost: 0.0015      # 卖出佣金 + 印花税
+    min_cost: 5
