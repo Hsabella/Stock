@@ -133,3 +133,5 @@ dmypy.json
 state/
 watchlist.yaml
 .venv-quant/
+mlruns/
+Users/
