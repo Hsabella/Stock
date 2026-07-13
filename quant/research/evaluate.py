@@ -20,7 +20,7 @@ from quant.research.ic_report import rank_ic, weekly_anchors
 
 RESULTS = Path("results/quant")
 
-# 验收硬门槛（plan 定案）
+# 验收硬门槛（第一期 plan 定案）
 GATES = [
     ("年化超额 vs 中证800 ≥ 8%", "excess_ann", 0.08, ">="),
     ("信息比率 ≥ 0.8", "ir", 0.8, ">="),
@@ -30,6 +30,19 @@ GATES = [
     ("ICIR ≥ 0.25", "icir", 0.25, ">="),
     ("周单边换手 ≤ 35%", "weekly_turnover", 0.35, "<="),
     ("成本翻倍后年化超额 ≥ 4%", "excess_2x", 0.04, ">="),
+]
+
+# v2 及格线（iteration_plan_v2 定案）：超额/IR 现实化 + 分年度稳定性；
+# 夏普不再单列（v1 的 0.8 随 8% 超额目标一起失效）；成本翻倍保留"翻倍后剩一半"的比例逻辑
+GATES_V2 = [
+    ("年化超额 vs 中证800 ≥ 4%", "excess_ann", 0.04, ">="),
+    ("信息比率 ≥ 0.5", "ir", 0.5, ">="),
+    ("分年度超额为正的年份占比 ≥ 2/3", "annual_pos", 2 / 3, ">="),
+    ("最大回撤 ≤ 25% 且 ≤ 基准", "mdd_ok", 1, ">="),
+    ("周度 RankIC ≥ 0.02", "ic", 0.02, ">="),
+    ("ICIR ≥ 0.25", "icir", 0.25, ">="),
+    ("周单边换手 ≤ 35%", "weekly_turnover", 0.35, "<="),
+    ("成本翻倍后年化超额 ≥ 2%", "excess_2x", 0.02, ">="),
 ]
 
 
@@ -84,7 +97,8 @@ def pred_weekly_ic(pred_tag: str) -> pd.Series:
     return pd.Series(ics).sort_index()
 
 
-def gate_table(m: dict, ic: pd.Series, m_2x: dict | None) -> pd.DataFrame:
+def gate_table(m: dict, ic: pd.Series, m_2x: dict | None,
+               annual: pd.DataFrame | None = None, gates: list = GATES) -> pd.DataFrame:
     vals = {
         "excess_ann": m["excess_ann"],
         "ir": m["ir"],
@@ -94,9 +108,10 @@ def gate_table(m: dict, ic: pd.Series, m_2x: dict | None) -> pd.DataFrame:
         "icir": ic.mean() / ic.std(),
         "weekly_turnover": m["weekly_turnover"],
         "excess_2x": m_2x["excess_ann"] if m_2x else float("nan"),
+        "annual_pos": (annual["超额"] > 0).mean() if annual is not None else float("nan"),
     }
     rows = []
-    for name, key, thr, op in GATES:
+    for name, key, thr, op in gates:
         v = vals[key]
         ok = (v >= thr) if op == ">=" else (v <= thr)
         rows.append({"门槛": name, "实测": round(float(v), 4), "结果": "✅ 过" if ok else "❌ 未过"})
@@ -134,6 +149,7 @@ def main() -> int:
     parser.add_argument("--main", default="bt_lgb_rolling", help="主评估变体（bt_*_daily.csv 的前缀）")
     parser.add_argument("--pred", default="pred_lgb_rolling")
     parser.add_argument("--out", default="docs/quant/phase1_report.md")
+    parser.add_argument("--gates", choices=["v1", "v2"], default="v1", help="v2=迭代及格线(超额4%/IR0.5/分年稳定)")
     args = parser.parse_args()
 
     daily = load_daily(args.main)
@@ -145,7 +161,8 @@ def main() -> int:
     m2x = bt_metrics(d2x) if d2x is not None else None
     ic = pred_weekly_ic(args.pred)
 
-    gates = gate_table(m, ic, m2x)
+    annual = annual_table(daily)
+    gates = gate_table(m, ic, m2x, annual, GATES_V2 if args.gates == "v2" else GATES)
     n_pass = (gates["结果"] == "✅ 过").sum()
     verdict = ("GO：全部硬门槛通过，可启动第二期"
                if n_pass == len(gates)
@@ -159,13 +176,13 @@ def main() -> int:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join([
-        "# 第一期验收报告（go/no-go）", "",
+        f"# 验收报告（{args.gates} 及格线，go/no-go）", "",
         f"- 主变体: {args.main}（滚动 walk-forward，2023 起全样本外，成本后）",
         f"- 区间: {daily.index[0].date()} → {daily.index[-1].date()}", "",
         f"## 判定：**{verdict}**", "",
         "## 硬门槛 checklist", "", gates.to_markdown(), "",
         "## 样本外周频 RankIC 分年", "", ic_annual.round(4).to_markdown(), "",
-        "## 分年度收益", "", annual_table(daily).round(4).to_markdown(), "",
+        "## 分年度收益", "", annual.round(4).to_markdown(), "",
         "## 全部变体对照", "", variants_table().round(4).to_markdown(), "",
     ]))
     print(gates)

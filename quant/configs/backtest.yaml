@@ -35,7 +35,7 @@ timing:
   ma_days: 200            # 沪深300 收盘(T-1) vs MA200(T-1)
   spx_threshold: -0.015   # 隔夜标普500 跌幅 ≤ -1.5% 触发 risk_off
   confirm_days: 2         # 状态切换需连续 N 日确认（防 MA 附近来回打脸）
-  exposure_off: 0.5       # risk_off 时仓位系数（敏感性再测 0.3/0.7）
+  exposure_off: 0.7       # risk_off 时仓位系数（v2 Step3 定案：第一期敏感性 0.3/0.5/0.7 的最优折中）
   overlay_cost: 0.001     # |Δexposure| 的近似调仓成本
 
 backtest:

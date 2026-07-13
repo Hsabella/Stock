@@ -41,7 +41,18 @@ EXPRESSIONS: dict[str, str] = {
 LABEL_EXPRESSION = "Ref($open,-6)/Ref($open,-1)-1"
 LABEL_NAME = "LABEL0"
 
-# parquet 数仓提供的扩展特征（ext_features.py 产出，名字在这里登记以便统一引用）
-EXT_FEATURES = ["turn_20", "turn_ratio_5_120", "size", "ep", "bp"]
+# parquet 数仓提供的扩展特征（ext_features.py 产出，名字在这里登记以便统一引用）。
+# 只有登记在此的列会进模型（handler 按本表过滤 parquet 列）。
+# v2 Step2 财报 PIT 因子按预注册门槛 |IC|≥0.015 裁决（factor_report_v2 实测）：
+# roe_delta +0.0164 入模；profit_yoy +0.0121、roe_ttm +0.0064 未达标，
+# 列仍在 parquet 里但不入模。v1 因子（含 size，本轮 IC 已衰减至 drop）原样保留，
+# 保证 Step2 归因干净（只加了 roe_delta 一个变量），删减留给 S3 组装时统一决策。
+# v2 Step3 风格切换特征（全截面同值，来自 index_daily 指数仓）：大盘 20 日波动/动量、
+# 大小盘风向。**已实测证伪不入模**（2026-07 v3 实验：限池超额 +2.4%→-3.9%）——同值列
+# 是"时间坐标"，树模型用它把训练窗切成时段逐段记忆标签，时间记忆过拟合。列仍产出在
+# parquet（供研究），handler 的 CSRankNormExempt 保留（若以后以分桶/交互形式重试）。
+REGIME_FEATURES = ["mkt_vol_20", "mkt_mom_20", "size_spread_20"]
+
+EXT_FEATURES = ["turn_20", "turn_ratio_5_120", "size", "ep", "bp", "roe_delta"]
 
 ALL_FEATURES = list(EXPRESSIONS) + EXT_FEATURES

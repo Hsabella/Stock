@@ -8,24 +8,39 @@ A 股自选股决策引擎：收盘后从 8 个维度给 watchlist 打分 + 状�
 
 ```bash
 # 全部用独立 venv: .venv-quant（pyqlib+lightgbm+akshare）
+.venv-quant/bin/python -m quant.live.daily_brief      # 晨间仓位建议(用户每日唯一必看,
+                                                      #  cron 工作日 09:00 → results/brief/latest.md)
 .venv-quant/bin/python -m quant.data.bootstrap        # 更新 qlib 数据包(chenditc, 日更)
 .venv-quant/bin/python -m quant.data.universe          # 重建 PIT 股票池 csi_union(~1800只)
 .venv-quant/bin/python -m quant.data.checks            # 数据质检(每次更新必跑)
-.venv-quant/bin/python -m quant.data.akshare_fetcher --dataset em_fundflow  # 资金流滚动累积(每周)
+.venv-quant/bin/python -m quant.data.akshare_fetcher --dataset em_fundflow --refresh  # 资金流滚动累积
+                                                      # (每周; --refresh 清断点, 周期性增量必加)
+.venv-quant/bin/python -m quant.data.akshare_fetcher --dataset financials --refresh   # 财报摘要(PIT)
+.venv-quant/bin/python -m quant.data.industry          # 行业标签快照(申万缓存+新浪补缺)
+.venv-quant/bin/python -m quant.data.index_daily       # 指数日线(300/1000/800)落仓
 .venv-quant/bin/python -m quant.features.ext_features  # 重建扩展特征 parquet
+.venv-quant/bin/python -m quant.features.neutralize --pred results/quant/pred_lgb_rolling.parquet  # 行业+市值中性化(研究用)
 .venv-quant/bin/python -m quant.research.ic_report     # 单因子周频 IC 体检
-.venv-quant/bin/python -m quant.model.baseline --model lgb --mode rolling   # 滚动训练
-.venv-quant/bin/python -m quant.backtest.run_backtest --pred results/quant/pred_lgb_rolling.parquet --start 2023-01-04
-.venv-quant/bin/python -m quant.backtest.overlay --daily results/quant/bt_lgb_rolling_daily.csv  # 择时叠加
-.venv-quant/bin/python -m quant.research.evaluate      # 验收 go/no-go 报告
+.venv-quant/bin/python -m quant.model.baseline --model lgb --mode rolling --tag <tag>  # 滚动训练
+.venv-quant/bin/python -m quant.backtest.run_backtest --pred results/quant/pred_<tag>.parquet --start 2023-01-04  # [--neutralize] [--topk N]
+.venv-quant/bin/python -m quant.backtest.overlay --daily results/quant/bt_<tag>_daily.csv  # 择时叠加
+.venv-quant/bin/python -m quant.research.evaluate --gates v2  # 验收报告(v2 及格线: 超额≥4%/IR≥0.5/分年≥2/3正)
 .venv-quant/bin/python -m pytest tests/quant/ -q
 ```
 
 关键事实：股票池=300+500+1000 成分 PIT 并集；周度调仓 open-to-open；成本足额建模；
-所有评估 2023 起全样本外（walk-forward）。**第一期结论 NO-GO(as-is)**：IC +0.056 达标但
-纯多头超额 -2.2% 未达标，迭代方向见 phase1_report（首选行业/市值中性化）。
+所有评估 2023 起全样本外（walk-forward）。**v2 迭代已执行完毕（2026-07-13），结论仍
+NO-GO**：主线（+roe_delta 财报因子、限池中证800、embargo 修正）超额 -2.2%→**+3.89%**、
+夏普 0.79、MDD 减半，但 IR/分年稳定性/成本翻倍未过线（alpha 绑定中小盘行情，25/26
+反向）；中性化和 regime 特征两个假设被实测证伪（过程与数据见
+[docs/quant/iteration_plan_v2.md](./docs/quant/iteration_plan_v2.md) 各 Step 实测小节 +
+[docs/quant/v2_report.md](./docs/quant/v2_report.md)）。**选股封存观察，项目收敛为
+"指数 ETF + 择时红绿灯 + 排雷器"**；红绿灯信号每日落 `results/brief/signal_log.csv` 攒实盘对账。
+用户日常只看 `results/brief/latest.md`（晨间红绿灯）；旧引擎 BUY 名单已证伪勿采信，仅风险预警可用。
 数据在 `~/.qlib/`（bin 包 + quant_warehouse parquet），不进 git；**东财资金流仅 120 天
-历史，需每周跑 fetcher 累积**；macOS 下 qlib 大面板调用必须有 `__main__` 保护。
+历史，需每周跑 fetcher 累积**（已挂 cron 周五 19:30 `scripts/weekly_data.sh`：fetcher+bootstrap+checks，
+连同工作日 09:00 `scripts/morning_brief.sh` 于 2026-07-10 装入 crontab）；
+macOS 下 qlib 大面板调用必须有 `__main__` 保护。
 
 ## 常用命令
 
