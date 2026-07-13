@@ -3,6 +3,11 @@
 > A 股自选股 **8 维决策引擎** — 收盘后扫描 + 多维 rank 加权 + 状态机决策
 > 看不懂的术语？查 [GLOSSARY.md](./GLOSSARY.md)
 
+> ⚠️ **2026-07 重要更新**：38 天全样本跟踪证明本引擎的 BUY 名单**跑输随机持有**（-11.9% vs 池子整体 -4.5%），
+> **请勿再按 BUY 名单买入**；报告仅"风险预警/排雷"部分可继续参考。项目已重构为 qlib 量化系统（`quant/`），
+> 你每天唯一需要看的变成 **`results/brief/latest.md`（晨间仓位红绿灯，工作日 09:00 自动生成）**：
+> 🟢=按计划持仓，🔴=股票仓位降到五成以下。选股模型迭代方案见 `docs/quant/iteration_plan_v2.md`（待执行）。
+
 ---
 
 ## 一句话理解
@@ -30,11 +35,14 @@
 ### 方式 A: 自动跑（已装 crontab）
 
 ```
+0  9             * * 1-5  morning_brief.sh      # 晨间仓位红绿灯 → results/brief/latest.md (每天唯一必看)
 0 10,11,13,14,15 * * 1-5  fetch_news_only.py    # 盘中每小时累积新闻样本
 30 18            * * 1-5  daily_run.sh          # 盘后 18:30 跑决策 + forward 对照 (此时新闻/资金流数据已稳定)
+30 19            * * 5    weekly_data.sh        # 周五收盘后: 东财资金流累积 + qlib 数据包更新 + 质检
 ```
 
-第二天起床看 `results/decisions/partial_<昨日>.md` + `results/forward/forward_<前日>.md`。
+早上开盘前看 `results/brief/latest.md`（🟢/🔴 仓位红绿灯）；旧引擎的
+`results/decisions/partial_<昨日>.md` 只看风险预警部分 + `results/forward/forward_<前日>.md` 对照。
 
 查看 / 调整：`crontab -l` / `crontab -e`
 

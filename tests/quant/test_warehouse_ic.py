@@ -57,3 +57,9 @@ def test_warehouse_append_dedupes(tmp_path, monkeypatch):
     assert warehouse.append("t", df2) == 3
     out = warehouse.load("t")
     assert out.loc[("SH600000", pd.Timestamp("2024-01-03")), "val"] == 99.0
+
+    # 原子替换语义：第二次 append 后旧版本转存 .bak（累积数据写坏可回退上一版）
+    bak = tmp_path / "t.parquet.bak"
+    assert bak.exists()
+    assert len(pd.read_parquet(bak)) == 2
+    assert not (tmp_path / "t.parquet.tmp").exists()

@@ -19,6 +19,7 @@ import pandas as pd
 from quant.config import load_config
 
 OUT_DIR = Path("results/quant")
+LABEL_HORIZON = 6  # alpha_pv.LABEL_EXPRESSION 向未来看 6 个交易日，滚动切分要按它做 embargo
 
 
 def _init_qlib():
@@ -99,7 +100,8 @@ def train_rolling(kind: str, cfg: dict) -> pd.Series:
     step = 0
     while i < len(cal) and cal[i] <= out_end:
         train_lo = cal[max(0, i - roll["train_days"])]
-        train_hi = cal[i - 1]
+        # embargo：末端样本的标签窗（未来 6 日）会踩进 test 段，整体后撤避免泄漏
+        train_hi = cal[i - 1 - LABEL_HORIZON]
         # 验证段：训练窗末尾 10% 供 LightGBM 早停，与训练段不重叠
         valid_idx = max(1, i - roll["train_days"] // 10)
         test_hi = cal[min(i + roll["step_days"] - 1, len(cal) - 1)]
@@ -127,6 +129,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=["lgb", "linear"], default="lgb")
     parser.add_argument("--mode", choices=["fixed", "rolling"], default="fixed")
+    parser.add_argument("--tag", default=None, help="产物名后缀，默认 <model>_<mode>；特征集变更时用于区分版本")
     args = parser.parse_args()
 
     cfg = load_config("backtest")
@@ -134,7 +137,7 @@ def main() -> int:
     pred = train_fixed(args.model, cfg) if args.mode == "fixed" else train_rolling(args.model, cfg)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    tag = f"{args.model}_{args.mode}"
+    tag = args.tag or f"{args.model}_{args.mode}"
     out = OUT_DIR / f"pred_{tag}.parquet"
     pred.to_frame().to_parquet(out)
     print(f"[baseline] 预测已写 {out}: {len(pred):,} 条, "

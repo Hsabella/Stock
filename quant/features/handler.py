@@ -14,13 +14,37 @@ from __future__ import annotations
 
 from qlib.contrib.data.handler import check_transform_proc
 from qlib.data.dataset.handler import DataHandlerLP
+from qlib.data.dataset.processor import Processor, get_group_columns
 
 from quant.data import warehouse
-from quant.features.alpha_pv import EXPRESSIONS, LABEL_EXPRESSION
+from quant.features.alpha_pv import EXPRESSIONS, EXT_FEATURES, LABEL_EXPRESSION, REGIME_FEATURES
 
-# 截面标准化（按日 rank 后 zscore）：无需拟合期参数 → 滚动训练零泄漏
+
+class CSRankNormExempt(Processor):
+    """CSRankNorm 变体：exempt 列保持原值。
+
+    regime 特征全截面同值，截面 rank 会把它们退化成常数（信息清零）；
+    LightGBM 对量纲不敏感，原值直接可用。其余列与 qlib CSRankNorm 同款处理。
+    """
+
+    def __init__(self, fields_group="feature", exempt=()):
+        self.fields_group = fields_group
+        self.exempt = set(exempt)
+
+    def __call__(self, df):
+        cols = get_group_columns(df, self.fields_group)
+        cols = [c for c in cols if (c[-1] if isinstance(c, tuple) else c) not in self.exempt]
+        t = df[cols].groupby("datetime", group_keys=False).rank(pct=True)
+        t -= 0.5
+        t *= 3.46  # 与 qlib CSRankNorm 相同：均匀分布 rank 的近似 zscore 缩放
+        df[cols] = t
+        return df
+
+
+# 截面标准化（按日 rank 后 zscore，regime 列豁免）：无需拟合期参数 → 滚动训练零泄漏
 _DEFAULT_INFER = [
-    {"class": "CSRankNorm", "kwargs": {"fields_group": "feature"}},
+    {"class": "CSRankNormExempt", "module_path": "quant.features.handler",
+     "kwargs": {"fields_group": "feature", "exempt": REGIME_FEATURES}},
     {"class": "Fillna", "kwargs": {"fields_group": "feature"}},
 ]
 _DEFAULT_LEARN = [
@@ -65,6 +89,9 @@ class AlphaV1Handler(DataHandlerLP):
             import pandas as pd
 
             ext = pd.read_parquet(ext_path)
+            # 只取 EXT_FEATURES 注册过的列：parquet 可以携带未注册/未验证的列
+            # （如 IC 体检不过的因子、留待 S3 的 regime 列）而不悄悄进模型
+            ext = ext[[c for c in EXT_FEATURES if c in ext.columns]]
             # StaticDataLoader 要求列带 (group, name) 两级
             ext.columns = pd.MultiIndex.from_product([["feature"], ext.columns])
             data_loader = NestedDataLoader(

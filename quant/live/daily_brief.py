@@ -6,11 +6,15 @@
 与回测同一套规则/防抖逻辑（复用 timing.raw_risk_off/debounce），保证"实盘看到的
 就是回测验证过的"。
 
-用法: python -m quant.live.daily_brief    # 每天开盘前跑，输出今日建议仓位
+用法:
+    python -m quant.live.daily_brief                        # 打印到终端
+    python -m quant.live.daily_brief --out-dir results/brief  # 同时写 brief_<日期>.md + latest.md
 """
 from __future__ import annotations
 
+import argparse
 import sys
+from pathlib import Path
 
 import pandas as pd
 
@@ -51,17 +55,61 @@ def brief(today: pd.Timestamp | None = None) -> dict:
     }
 
 
-def main() -> int:
-    b = brief()
+def format_brief(b: dict) -> str:
     tone = "🟢 正常" if b["state"] == "risk_on" else "🔴 防守"
-    print(f"[{b['date']}] 今日风险状态: {tone} → 建议股票仓位上限 {b['exposure']:.0%}")
-    print(f"  沪深300 昨收 {b['hs300_close']:.0f}, 相对 MA200 {b['hs300_vs_ma200']:+.1%}"
-          f"{'（跌破均线）' if b['hs300_vs_ma200'] < 0 else ''}")
-    print(f"  隔夜标普500 {b['spx_overnight']:+.2%}"
-          f"{'（触发防守阈值）' if b['spx_overnight'] <= -0.015 else ''}")
+    lines = [
+        f"[{b['date']}] 今日风险状态: {tone} → 建议股票仓位上限 {b['exposure']:.0%}",
+        f"  沪深300 昨收 {b['hs300_close']:.0f}, 相对 MA200 {b['hs300_vs_ma200']:+.1%}"
+        f"{'（跌破均线）' if b['hs300_vs_ma200'] < 0 else ''}",
+        f"  隔夜标普500 {b['spx_overnight']:+.2%}"
+        f"{'（触发防守阈值）' if b['spx_overnight'] <= -0.015 else ''}",
+    ]
     if b["raw_today"] != (b["state"] == "risk_off"):
-        print("  ⚠️ 原始信号与当前状态不一致（防抖确认中），连续第二天出现将切换状态")
-    return 0
+        lines.append("  ⚠️ 原始信号与当前状态不一致（防抖确认中），连续第二天出现将切换状态")
+    return "\n".join(lines)
+
+
+def append_signal_log(path: Path, b: dict) -> None:
+    """攒实盘信号流水（date,state,...），为红绿灯 track record 积累对账数据。"""
+    line = f"{b['date']},{b['state']},{int(b['raw_today'])},{b['exposure']:.2f},{b['hs300_close']:.1f}\n"
+    if not path.exists():
+        path.write_text("date,state,raw_today,exposure,hs300_close\n" + line)
+        return
+    content = path.read_text()
+    if f"{b['date']}," not in content:  # 同日重跑不重复记
+        path.write_text(content + line)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out-dir", type=Path, default=None)
+    args = parser.parse_args()
+
+    try:
+        b = brief()
+        text = format_brief(b)
+    except Exception as e:  # cron 场景下失败也要落盘可见
+        b = None
+        text = f"⚠️ 晨间建议生成失败: {type(e).__name__}: {e}\n（数据源可能暂不可用，可稍后手动重跑）"
+
+    if args.out_dir:
+        alert = args.out_dir / "data_health_alert.txt"  # weekly_data.sh 失败时写入，成功后清除
+        if alert.exists():
+            text += f"\n⚠️ {alert.read_text().strip()}"
+    text += f"\n（生成于 {pd.Timestamp.now():%Y-%m-%d %H:%M}）"
+
+    print(text)
+    if args.out_dir:
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = b["date"].replace("-", "") if b else pd.Timestamp.now().strftime("%Y%m%d")
+        if b:
+            (args.out_dir / f"brief_{stamp}.md").write_text(text + "\n")
+            (args.out_dir / "latest.md").write_text(text + "\n")
+            append_signal_log(args.out_dir / "signal_log.csv", b)
+        else:
+            # 失败不覆盖 latest.md——保留最后一次有效建议（红灯日被"生成失败"顶掉=真金白银的风险）
+            (args.out_dir / f"brief_{stamp}_failed.md").write_text(text + "\n")
+    return 0 if b else 1
 
 
 if __name__ == "__main__":

@@ -35,7 +35,8 @@ def load_signal(path: Path, randomize: bool, seed: int = 42) -> pd.Series:
 
 
 def run(pred_path: Path, random_signal: bool, cost_mult: float, tag: str | None,
-        start: str | None = None, end: str | None = None, topk: int | None = None) -> int:
+        start: str | None = None, end: str | None = None, topk: int | None = None,
+        neutralize: bool = False) -> int:
     import qlib
     from qlib.contrib.evaluate import backtest_daily
 
@@ -44,6 +45,9 @@ def run(pred_path: Path, random_signal: bool, cost_mult: float, tag: str | None,
     qlib.init(provider_uri=dcfg["qlib"]["provider_uri"], region="cn")
 
     score = load_signal(pred_path, random_signal)
+    if neutralize:
+        from quant.features.neutralize import neutralize as _neutralize
+        score = _neutralize(score)
     bcfg = cfg["backtest"]
     scfg = dict(cfg["strategy"])
     if topk is not None:
@@ -73,6 +77,8 @@ def run(pred_path: Path, random_signal: bool, cost_mult: float, tag: str | None,
     )
 
     name = tag or pred_path.stem.replace("pred_", "")
+    if neutralize:
+        name += "_neutral"
     if random_signal:
         name += "_random"
     if cost_mult != 1:
@@ -92,8 +98,11 @@ def main() -> int:
     parser.add_argument("--start", default=None)
     parser.add_argument("--end", default=None)
     parser.add_argument("--topk", type=int, default=None)
+    parser.add_argument("--neutralize", action="store_true",
+                        help="加载 pred 后先做行业+市值中性化（v2 Step1）")
     args = parser.parse_args()
-    return run(args.pred, args.random_signal, args.cost_mult, args.tag, args.start, args.end, args.topk)
+    return run(args.pred, args.random_signal, args.cost_mult, args.tag, args.start, args.end,
+               args.topk, args.neutralize)
 
 
 if __name__ == "__main__":

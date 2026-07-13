@@ -1,10 +1,13 @@
 """本地 parquet 数仓：qlib bin 之外的扩展数据（换手率/估值/资金流）统一落这里。
 
 存储约定：每个 dataset 一个 parquet，长表格式，列含 instrument / datetime + 数据列。
-append 语义：新数据与旧数据按 (instrument, datetime) 去重，保留最新一次写入。
+append 语义：新数据与旧数据按 (instrument, datetime) 去重，保留最新一次写入；
+写入为"临时文件 + 原子替换"，替换前旧文件转存 .bak——em_fundflow 这类源头只留
+120 天的数据集靠周更累积攒历史，进程被杀/磁盘满导致的半截 parquet 意味着永久丢失。
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -48,7 +51,13 @@ def append(name: str, new: pd.DataFrame) -> int:
     old = load(name)
     merged = pd.concat([old, new])
     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-    merged.to_parquet(dataset_path(name))
+
+    path = dataset_path(name)
+    tmp = path.with_suffix(".parquet.tmp")
+    merged.to_parquet(tmp)
+    if path.exists():
+        os.replace(path, path.with_suffix(".parquet.bak"))
+    os.replace(tmp, path)
     return len(merged)
 
 
