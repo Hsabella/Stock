@@ -42,30 +42,69 @@ def brief(today: pd.Timestamp | None = None) -> dict:
     df["risk_off"] = debounce(df["raw_risk_off"], cfg["confirm_days"])
 
     t = df.index[-1]
-    ma = hs300.rolling(cfg["ma_days"]).mean().iloc[-1]
+    ma_series = hs300.rolling(cfg["ma_days"]).mean()
     state = "risk_off" if df["risk_off"].iloc[-1] else "risk_on"
+    raw = df["raw_risk_off"]
+    streak = 1  # 原始信号当前值已连续几天（供"确认进度"展示）
+    for v in raw.iloc[:-1][::-1]:
+        if bool(v) != bool(raw.iloc[-1]):
+            break
+        streak += 1
     return {
         "date": str(t.date()),
         "state": state,
         "exposure": cfg["exposure_off"] if state == "risk_off" else 1.0,
         "hs300_close": float(hs300.iloc[-1]),
-        "hs300_vs_ma200": float(hs300.iloc[-1] / ma - 1),
+        "hs300_vs_ma200": float(hs300.iloc[-1] / ma_series.iloc[-1] - 1),
+        "ma200": float(ma_series.iloc[-1]),
+        "vs_ma200_prev5": float(hs300.iloc[-6] / ma_series.iloc[-6] - 1),
+        "hs300_5d_chg": float(hs300.iloc[-1] / hs300.iloc[-6] - 1),
         "spx_overnight": float(df["spx_overnight"].iloc[-1]),
-        "raw_today": bool(df["raw_risk_off"].iloc[-1]),
+        "spx_threshold": float(cfg["spx_threshold"]),
+        "confirm_days": int(cfg["confirm_days"]),
+        "exposure_off": float(cfg["exposure_off"]),
+        "raw_today": bool(raw.iloc[-1]),
+        "raw_streak": int(streak),
     }
 
 
 def format_brief(b: dict) -> str:
-    tone = "🟢 正常" if b["state"] == "risk_on" else "🔴 防守"
+    green = b["state"] == "risk_on"
+    tone = "🟢 正常" if green else "🔴 防守"
+    narrowing = b["hs300_vs_ma200"] < b["vs_ma200_prev5"]
     lines = [
         f"[{b['date']}] 今日风险状态: {tone} → 建议股票仓位上限 {b['exposure']:.0%}",
-        f"  沪深300 昨收 {b['hs300_close']:.0f}, 相对 MA200 {b['hs300_vs_ma200']:+.1%}"
-        f"{'（跌破均线）' if b['hs300_vs_ma200'] < 0 else ''}",
-        f"  隔夜标普500 {b['spx_overnight']:+.2%}"
-        f"{'（触发防守阈值）' if b['spx_overnight'] <= -0.015 else ''}",
+        "",
+        f"【大盘趋势】沪深300 昨收 {b['hs300_close']:.0f}",
+        f"  相对 MA200({b['ma200']:.0f}): {b['hs300_vs_ma200']:+.1%}"
+        f"（5 个交易日前 {b['vs_ma200_prev5']:+.1%}，缓冲{'收窄中' if narrowing else '加厚中'}）",
+        f"  近 5 个交易日大盘 {b['hs300_5d_chg']:+.1%}",
     ]
-    if b["raw_today"] != (b["state"] == "risk_off"):
-        lines.append("  ⚠️ 原始信号与当前状态不一致（防抖确认中），连续第二天出现将切换状态")
+    if b["hs300_vs_ma200"] >= 0:
+        fall = abs(b["ma200"] / b["hs300_close"] - 1)
+        lines.append(f"  → 距离防守线: 再跌 {fall:.1%} 即跌破 MA200，"
+                     f"之后还需连续 {b['confirm_days']} 日确认才转 🔴")
+    else:
+        rise = b["ma200"] / b["hs300_close"] - 1
+        lines.append(f"  → 距离恢复线: 需涨 {rise:+.1%} 收复 MA200，"
+                     f"之后还需连续 {b['confirm_days']} 日确认才转 🟢")
+    hit = b["spx_overnight"] <= b["spx_threshold"]
+    lines += [
+        "",
+        f"【隔夜美股】标普500 {b['spx_overnight']:+.2%}"
+        f"（防守触发线 {b['spx_threshold']:.1%}，{'⚠️ 已触发' if hit else '未触发'}）",
+    ]
+    if b["raw_today"] != (not green):
+        left = max(1, b["confirm_days"] - b["raw_streak"])
+        flip, verb = ("🔴", "防守信号已触发") if green else ("🟢", "恢复信号已出现")
+        lines += ["", f"⚠️ {verb}（第 {b['raw_streak']} 天），再连续确认 {left} 天即转 {flip}"
+                      f"{'——可提前想好减仓动作' if green else ''}"]
+    lines += [
+        "",
+        f"【规则】趋势级过滤器，单日涨跌不触发：跌破 MA200 或 隔夜标普≤{b['spx_threshold']:.1%}，"
+        f"连续 {b['confirm_days']} 日确认才转 🔴（仓位上限降至 {b['exposure_off']:.0%}），反向同理转回 🟢。",
+        "  回测参考: 2024-01 崩盘段该规则把 -12.6% 回撤压到 -3.9%（docs/quant/phase1_report.md）",
+    ]
     return "\n".join(lines)
 
 
