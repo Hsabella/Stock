@@ -101,6 +101,31 @@ def test_lights_error_degrades_without_killing_main_light():
     assert "🟢 正常" in text and "【隔夜美股】" in text  # 主灯照常
 
 
+FAKE_HOLDINGS = {"signal_date": "20260715", "any_stale": False, "rows": [
+    {"symbol": "601698", "name": "中国卫通", "position": 1200, "close": 27.42,
+     "close_date": "2026-07-15", "stale": False, "entry": 30.306, "pnl_pct": -0.0952,
+     "value": 32904.0, "hard_stop": 27.88, "atr_stop": 25.9, "stop_line": 27.88,
+     "broken": True, "dist_pct": -0.0165, "decision": "DROP",
+     "risks": ["PE_TTM=296（估值偏高）"]},
+    {"symbol": "002716", "name": "湖南白银", "position": 1000, "close": 7.45,
+     "close_date": "2026-07-15", "stale": False, "entry": 8.705, "pnl_pct": -0.1442,
+     "value": 7450.0, "hard_stop": 8.01, "atr_stop": 7.0, "stop_line": 8.01,
+     "broken": True, "dist_pct": -0.07, "decision": "HOLD", "risks": []},
+]}
+
+
+def test_format_holdings_shows_stops_and_engine_signal():
+    text = daily_brief.format_brief(dict(FAKE, holdings=FAKE_HOLDINGS))
+    assert "【持仓健康度】" in text and "引擎信号=20260715" in text
+    assert "中国卫通 601698" in text and "已破❗" in text and "引擎:DROP" in text
+    assert "湖南白银" in text and "引擎:HOLD" not in text  # HOLD 不重复展示
+
+
+def test_holdings_error_degrades_without_killing_main_light():
+    text = daily_brief.format_brief(dict(FAKE, holdings_error="FileNotFoundError: x"))
+    assert "⚠️ 持仓健康度生成失败" in text and "🟢 正常" in text
+
+
 def test_lights_log_dedupes(monkeypatch, tmp_path):
     fake = dict(FAKE, lights=[dict(x) for x in FAKE_LIGHTS])
     assert _run(monkeypatch, tmp_path, lambda: dict(fake)) == 0

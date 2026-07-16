@@ -101,11 +101,17 @@ def brief(today: pd.Timestamp | None = None) -> dict:
         "raw_today": bool(raw.iloc[-1]),
         "raw_streak": _streak(raw),
     }
-    # 结构灯独立降级：任何异常只损失本段，绝不拖垮主灯（红灯日被顶掉=真金白银风险）
+    # 结构灯/持仓段独立降级：任何异常只损失本段，绝不拖垮主灯（红灯日被顶掉=真金白银风险）
     try:
         out["lights"] = lights_status(today)
     except Exception as e:
         out["lights_error"] = f"{type(e).__name__}: {e}"
+    try:
+        from quant.live.portfolio import holdings_health
+
+        out["holdings"] = holdings_health(today=today)
+    except Exception as e:
+        out["holdings_error"] = f"{type(e).__name__}: {e}"
     return out
 
 
@@ -127,6 +133,34 @@ def _format_lights(b: dict) -> list[str]:
             left = max(1, lt["confirm_days"] - lt["raw_streak"])
             flip = "🔴" if lt["state"] == "risk_on" else "🟢"
             seg += f"（翻转信号第 {lt['raw_streak']} 天，再 {left} 天确认转 {flip}）"
+        lines.append(seg)
+    return lines
+
+
+def _format_holdings(b: dict) -> list[str]:
+    if "holdings_error" in b:
+        return ["", f"⚠️ 持仓健康度生成失败: {b['holdings_error']}"]
+    h = b.get("holdings")
+    if not h or not h["rows"]:
+        return []
+    head = "【持仓健康度】现价=缓存收盘"
+    if h["signal_date"]:
+        head += f" · 引擎信号={h['signal_date']}"
+    if h["any_stale"]:
+        head += " ⚠️ 部分K线陈旧"
+    lines = ["", head]
+    for r in h["rows"]:
+        if r.get("error"):
+            lines.append(f"  {r['name']} {r['symbol']} ⚠️ {r['error']}")
+            continue
+        stop = (f"止损线 {r['stop_line']:.2f} 已破❗"
+                if r["broken"] else f"止损线 {r['stop_line']:.2f}（距离 {r['dist_pct']:+.1%}）")
+        seg = (f"  {r['name']} {r['symbol']} {r['close']:.2f}/{r['entry']:.2f} "
+               f"{r['pnl_pct']:+.1%} | {stop}")
+        if r["decision"] in ("REDUCE", "DROP", "STOP", "TAKE"):
+            seg += f" | 引擎:{r['decision']}"
+        if r["risks"]:
+            seg += " ⚠️" + "·".join(r["risks"])
         lines.append(seg)
     return lines
 
@@ -163,6 +197,7 @@ def format_brief(b: dict) -> str:
         flip, verb = ("🔴", "防守信号已触发") if green else ("🟢", "恢复信号已出现")
         lines += ["", f"⚠️ {verb}（第 {b['raw_streak']} 天），再连续确认 {left} 天即转 {flip}"
                       f"{'——可提前想好减仓动作' if green else ''}"]
+    lines += _format_holdings(b)
     lines += [
         "",
         f"【规则】趋势级过滤器，单日涨跌不触发：跌破 MA200 或 隔夜标普≤{b['spx_threshold']:.1%}，"
