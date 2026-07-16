@@ -30,6 +30,21 @@ strategy:
   n_drop: 8
   risk_degree: 0.95        # 常态仓位上限，择时层（M4）在此之上再打折
 
+timing_lights:
+  # 晨报结构灯（只用 MA 腿）。参数由 docs/quant/timing_lights_report.md 回测定案(2026-07-16)，
+  # 禁止手改；mode: advice=可给操作建议 / display_only=仅展示状态（未过验收门槛）
+  - symbol: sh000852
+    name: 中证1000
+    ma_days: 200
+    confirm_days: 3
+    mode: display_only
+  - symbol: sh000688
+    name: 科创50
+    ma_days: 200
+    confirm_days: 3
+    mode: advice
+    advice_off: "科创/题材持仓暂停加仓，新增仓位减半"
+
 timing:
   # 择时层基础版（M4）：全部用 T 日开盘前可得信息
   ma_days: 200            # 沪深300 收盘(T-1) vs MA200(T-1)
