@@ -82,6 +82,13 @@ def raw_risk_off(hs300: pd.Series, spx: pd.Series, ma_days: int, spx_threshold: 
     return df
 
 
+def raw_ma_off(close: pd.Series, ma_days: int, calendar: pd.DatetimeIndex) -> pd.Series:
+    """单指数纯 MA 腿的原始 risk_off（无隔夜美股触发源），供结构灯复用。"""
+    empty_spx = pd.Series(dtype=float)
+    df = raw_risk_off(close, empty_spx, ma_days, spx_threshold=-1.0, calendar=calendar)
+    return df["raw_risk_off"]
+
+
 def debounce(raw: pd.Series, confirm_days: int) -> pd.Series:
     """状态切换需连续 confirm_days 日反向信号确认。"""
     state = False  # 初始 risk_on

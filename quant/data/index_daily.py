@@ -15,7 +15,7 @@ import pandas as pd
 from quant.data import warehouse
 
 DATASET = "index_daily"
-INDEXES = ["sh000300", "sh000852", "sh000906"]  # 沪深300 / 中证1000 / 中证800
+INDEXES = ["sh000300", "sh000852", "sh000906", "sh000688"]  # 沪深300 / 中证1000 / 中证800 / 科创50
 THROTTLE_SEC = 0.4
 
 
@@ -46,7 +46,7 @@ def build() -> int:
 
 
 def load_closes() -> pd.DataFrame:
-    """宽表：index=datetime, columns=SH000300/SH000852/SH000906 收盘价。"""
+    """宽表：index=datetime, columns=SH000300/SH000852/SH000906/SH000688 收盘价。"""
     df = warehouse.load(DATASET)
     if df.empty:
         return pd.DataFrame()
