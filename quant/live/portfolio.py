@@ -111,6 +111,64 @@ def latest_engine_signals() -> tuple[dict, str]:
     return out, date
 
 
+def structure_drift(cfg: dict | None = None, health: dict | None = None) -> dict:
+    """晨报【结构修正跟踪】数据：当前 vs 目标结构的偏离与待执行动作（规则生成）。
+
+    ETF 按成本估值（宽基波动对 10 个点的结构带宽影响可忽略，避免再引入行情依赖）。
+    """
+    cfg = cfg or load_portfolio_config()
+    health = health or holdings_health(cfg)
+    target = cfg["target_structure"]
+    lo, hi = target.get("core_etf_pct", [0.40, 0.50])
+    max_count = int(target.get("satellite_max_count", 3))
+    max_pct = float(target.get("satellite_max_pct", 0.10))
+
+    rows = [r for r in health["rows"] if not r.get("error")]
+    stock_value = sum(r["value"] for r in rows)
+    etf_value = sum(float(e["position"]) * float(e["entry_price"])
+                    for e in cfg["account"].get("etf", []))
+    cash = float(cfg["account"].get("cash", 0))
+    total = cash + stock_value + etf_value
+    if total <= 0:
+        return {"error": "总资产为 0（检查 account.cash 与持仓）"}
+
+    etf_pct, stock_pct = etf_value / total, stock_value / total
+    over_weight = [r for r in rows if r["value"] / total > max_pct]
+    count_over = len(rows) - max_count
+
+    # 减仓候选按严重度排序：引擎 DROP/STOP > REDUCE > 已破止损
+    def severity(r):
+        return (0 if r["decision"] in ("DROP", "STOP") else
+                1 if r["decision"] == "REDUCE" else
+                2 if r["broken"] else 3)
+
+    candidates = sorted(rows, key=severity)
+    actions = []
+    if count_over > 0:
+        def label(r):
+            if r["decision"] in ("DROP", "STOP", "REDUCE", "TAKE"):
+                return r["decision"]
+            return "已破止损" if r["broken"] else "弱势"
+
+        names = "·".join(f"{r['name']}({label(r)})" for r in candidates[:count_over + 1])
+        actions.append(f"卫星个股 {len(rows)} 只超上限 {max_count} 只，优先处置: {names}")
+    for r in over_weight:
+        actions.append(f"{r['name']} 占总资产 {r['value'] / total:.0%} 超单票上限 {max_pct:.0%}，"
+                       f"至少减 {r['value'] - total * max_pct:,.0f} 元")
+    if etf_pct < lo:
+        actions.append(f"核心宽基ETF 建仓至 ≥{lo:.0%}（缺口约 {total * lo - etf_value:,.0f} 元，分批）")
+    return {
+        "total": total, "cash": cash, "cash_pct": cash / total,
+        "stock_value": stock_value, "stock_pct": stock_pct,
+        "etf_value": etf_value, "etf_pct": etf_pct,
+        "stock_count": len(rows),
+        "target": {"core_etf_lo": lo, "core_etf_hi": hi,
+                   "max_count": max_count, "max_pct": max_pct},
+        "actions": actions,
+        "compliant": not actions,
+    }
+
+
 def holdings_health(cfg: dict | None = None, today: pd.Timestamp | None = None) -> dict:
     """晨报【持仓健康度】数据：每只 HELD 的现价/浮亏/止损线/引擎信号。"""
     cfg = cfg or load_portfolio_config()

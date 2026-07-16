@@ -81,6 +81,57 @@ def test_load_kline_stale_detection(tmp_path, monkeypatch):
     assert stale and not df.empty  # 降级失败仍给旧数据, 由调用方标 ⚠️
 
 
+def _cfg(cash=80000.0, etf=None):
+    return {
+        "held": [], "atr_k": 2.0, "hard_stop_pct": 0.08,
+        "account": {"cash": cash, "etf": etf or []},
+        "target_structure": {"core_etf_pct": [0.40, 0.50],
+                             "satellite_max_count": 3, "satellite_max_pct": 0.10},
+    }
+
+
+def _row(name, value, decision="", broken=False):
+    return {"symbol": "000000", "name": name, "value": value,
+            "decision": decision, "broken": broken}
+
+
+def test_structure_drift_over_allocated():
+    """5 只个股+零 ETF：超只数、超单票、ETF 缺口三类动作齐出，且处置排序按严重度。"""
+    health = {"rows": [
+        _row("翔鹭钨业", 41000, broken=True),
+        _row("中国卫通", 33000, decision="DROP"),
+        _row("东材科技", 24000, broken=True),
+        _row("雪人集团", 14000, decision="REDUCE"),
+        _row("湖南白银", 7500, decision="HOLD"),
+    ]}
+    s = portfolio.structure_drift(cfg=_cfg(cash=80000), health=health)
+    assert not s["compliant"]
+    assert abs(s["total"] - 199500) < 1e-6
+    acts = "\n".join(s["actions"])
+    assert "5 只超上限 3 只" in acts
+    assert acts.index("中国卫通(DROP)") < acts.index("雪人集团(REDUCE)")  # 严重度排序
+    assert "翔鹭钨业 占总资产 21%" in acts
+    assert "核心宽基ETF 建仓至 ≥40%" in acts
+
+
+def test_structure_drift_compliant():
+    health = {"rows": [_row("卫星A", 15000), _row("卫星B", 12000)]}
+    s = portfolio.structure_drift(
+        cfg=_cfg(cash=63000, etf=[{"position": 30000, "entry_price": 3.0}]),
+        health=health)  # 总 18万: ETF 9万(50%) 个股 2.7万 现金 6.3万
+    assert s["compliant"] and s["actions"] == []
+
+
+def test_structure_drift_etf_building_in_progress():
+    """ETF 已建一部分但未到 40%：只剩缺口动作。"""
+    health = {"rows": [_row("卫星A", 15000)]}
+    s = portfolio.structure_drift(
+        cfg=_cfg(cash=105000, etf=[{"position": 20000, "entry_price": 3.0}]), health=health)
+    # 总 18万: ETF 6万(33%) → 缺口 = 18万×40% - 6万 = 1.2万
+    assert len(s["actions"]) == 1
+    assert "缺口约 12,000 元" in s["actions"][0]
+
+
 def test_latest_engine_signals_parses_risks(tmp_path, monkeypatch):
     dec = tmp_path / "decisions"
     dec.mkdir()

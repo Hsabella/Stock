@@ -112,6 +112,12 @@ def brief(today: pd.Timestamp | None = None) -> dict:
         out["holdings"] = holdings_health(today=today)
     except Exception as e:
         out["holdings_error"] = f"{type(e).__name__}: {e}"
+    try:
+        from quant.live.portfolio import structure_drift
+
+        out["structure"] = structure_drift(health=out.get("holdings"))
+    except Exception as e:
+        out["structure_error"] = f"{type(e).__name__}: {e}"
     return out
 
 
@@ -165,6 +171,30 @@ def _format_holdings(b: dict) -> list[str]:
     return lines
 
 
+def _format_structure(b: dict) -> list[str]:
+    if "structure_error" in b:
+        return ["", f"⚠️ 结构修正跟踪生成失败: {b['structure_error']}"]
+    s = b.get("structure")
+    if not s:
+        return []
+    if s.get("error"):
+        return ["", f"⚠️ 结构修正跟踪: {s['error']}"]
+    t = s["target"]
+    if s["compliant"]:
+        return ["", f"【结构修正跟踪】✅ 已达标（核心ETF {s['etf_pct']:.0%} · "
+                    f"卫星 {s['stock_count']} 只 · 现金 {s['cash_pct']:.0%}）"]
+    lines = [
+        "",
+        f"【结构修正跟踪】目标: 核心ETF {t['core_etf_lo']:.0%}-{t['core_etf_hi']:.0%}"
+        f" · 卫星≤{t['max_count']}只×≤{t['max_pct']:.0%} · 余为现金",
+        f"  当前: 总资产 {s['total'] / 1e4:.1f}万 = 现金 {s['cash_pct']:.0%}"
+        f" + 个股 {s['stock_count']}只 {s['stock_pct']:.0%}"
+        f" + 核心ETF {s['etf_pct']:.0%}",
+    ]
+    lines += [f"  待执行{i}: {a}" for i, a in enumerate(s["actions"], 1)]
+    return lines
+
+
 def format_brief(b: dict) -> str:
     green = b["state"] == "risk_on"
     tone = "🟢 正常" if green else "🔴 防守"
@@ -198,6 +228,7 @@ def format_brief(b: dict) -> str:
         lines += ["", f"⚠️ {verb}（第 {b['raw_streak']} 天），再连续确认 {left} 天即转 {flip}"
                       f"{'——可提前想好减仓动作' if green else ''}"]
     lines += _format_holdings(b)
+    lines += _format_structure(b)
     lines += [
         "",
         f"【规则】趋势级过滤器，单日涨跌不触发：跌破 MA200 或 隔夜标普≤{b['spx_threshold']:.1%}，"

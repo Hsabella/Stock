@@ -9,7 +9,11 @@ A 股自选股决策引擎：收盘后从 8 个维度给 watchlist 打分 + 状�
 ```bash
 # 全部用独立 venv: .venv-quant（pyqlib+lightgbm+akshare）
 .venv-quant/bin/python -m quant.live.daily_brief      # 晨间仓位建议(用户每日唯一必看,
-                                                      #  cron 工作日 09:00 → results/brief/latest.md)
+                                                      #  cron 工作日 09:00 → results/brief/latest.md;
+                                                      #  2026-07-16 起含结构灯/持仓健康度/结构修正跟踪,
+                                                      #  灯参数经回测定案 docs/quant/timing_lights_report.md,
+                                                      #  持仓与账户配置在 watchlist.yaml 顶层 account 段)
+.venv-quant/bin/python -m quant.research.timing_lights # 结构灯敏感性回测(改灯参数前必跑)
 .venv-quant/bin/python -m quant.data.bootstrap        # 更新 qlib 数据包(chenditc, 日更)
 .venv-quant/bin/python -m quant.data.universe          # 重建 PIT 股票池 csi_union(~1800只)
 .venv-quant/bin/python -m quant.data.checks            # 数据质检(每次更新必跑)
