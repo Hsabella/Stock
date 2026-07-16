@@ -18,18 +18,58 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant.backtest.timing import debounce, raw_risk_off
+from quant.backtest.timing import debounce, raw_ma_off, raw_risk_off
 from quant.config import load_config
+
+
+def fetch_index(symbol: str) -> pd.Series:
+    """新浪指数日线收盘序列（取到 T-1 收盘）。"""
+    import akshare as ak
+
+    df = ak.stock_zh_index_daily(symbol=symbol)
+    s = pd.Series(df["close"].to_numpy(), index=pd.to_datetime(df["date"]), dtype=float)
+    return s.sort_index()
 
 
 def fetch_live_series() -> tuple[pd.Series, pd.Series]:
     import akshare as ak
 
-    hs = ak.stock_zh_index_daily(symbol="sh000300")
-    hs300 = pd.Series(hs["close"].to_numpy(), index=pd.to_datetime(hs["date"]), dtype=float)
+    hs300 = fetch_index("sh000300")
     us = ak.index_us_stock_sina(symbol=".INX")
     spx = pd.Series(us["close"].to_numpy(), index=pd.to_datetime(us["date"]), dtype=float)
-    return hs300.sort_index(), spx.sort_index()
+    return hs300, spx.sort_index()
+
+
+def _streak(raw: pd.Series) -> int:
+    """原始信号当前值已连续几天（供"确认进度"展示）。"""
+    streak = 1
+    for v in raw.iloc[:-1][::-1]:
+        if bool(v) != bool(raw.iloc[-1]):
+            break
+        streak += 1
+    return streak
+
+
+def lights_status(today: pd.Timestamp) -> list[dict]:
+    """结构灯：配置驱动的单指数 MA 腿规则（参数经 timing_lights 回测定案）。"""
+    out = []
+    for cfg in load_config("backtest").get("timing_lights", []):
+        close = fetch_index(cfg["symbol"])
+        calendar = pd.DatetimeIndex(
+            [*close.index[close.index >= "2019-01-01"], today]).unique().sort_values()
+        raw = raw_ma_off(close, cfg["ma_days"], calendar)
+        off = debounce(raw, cfg["confirm_days"])
+        ma = close.rolling(cfg["ma_days"]).mean()
+        out.append({
+            "name": cfg["name"], "symbol": cfg["symbol"],
+            "state": "risk_off" if off.iloc[-1] else "risk_on",
+            "close": float(close.iloc[-1]),
+            "vs_ma": float(close.iloc[-1] / ma.iloc[-1] - 1),
+            "ma_days": int(cfg["ma_days"]), "confirm_days": int(cfg["confirm_days"]),
+            "mode": cfg["mode"], "advice_off": cfg.get("advice_off", ""),
+            "raw_today": bool(raw.iloc[-1]), "raw_streak": _streak(raw),
+        })
+    return out
 
 
 def brief(today: pd.Timestamp | None = None) -> dict:
@@ -45,12 +85,7 @@ def brief(today: pd.Timestamp | None = None) -> dict:
     ma_series = hs300.rolling(cfg["ma_days"]).mean()
     state = "risk_off" if df["risk_off"].iloc[-1] else "risk_on"
     raw = df["raw_risk_off"]
-    streak = 1  # 原始信号当前值已连续几天（供"确认进度"展示）
-    for v in raw.iloc[:-1][::-1]:
-        if bool(v) != bool(raw.iloc[-1]):
-            break
-        streak += 1
-    return {
+    out = {
         "date": str(t.date()),
         "state": state,
         "exposure": cfg["exposure_off"] if state == "risk_off" else 1.0,
@@ -64,8 +99,36 @@ def brief(today: pd.Timestamp | None = None) -> dict:
         "confirm_days": int(cfg["confirm_days"]),
         "exposure_off": float(cfg["exposure_off"]),
         "raw_today": bool(raw.iloc[-1]),
-        "raw_streak": int(streak),
+        "raw_streak": _streak(raw),
     }
+    # 结构灯独立降级：任何异常只损失本段，绝不拖垮主灯（红灯日被顶掉=真金白银风险）
+    try:
+        out["lights"] = lights_status(today)
+    except Exception as e:
+        out["lights_error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+def _format_lights(b: dict) -> list[str]:
+    if "lights_error" in b:
+        return ["", f"⚠️ 结构灯生成失败: {b['lights_error']}"]
+    lights = b.get("lights")
+    if not lights:
+        return []
+    lines = ["", "【结构灯】持仓风格监控（参数回测定案: docs/quant/timing_lights_report.md）"]
+    for lt in lights:
+        icon = "🟢" if lt["state"] == "risk_on" else "🔴"
+        seg = f"  {lt['name']} {icon} 昨收 {lt['close']:.0f}  MA{lt['ma_days']} {lt['vs_ma']:+.1%}"
+        if lt["mode"] == "display_only":
+            seg += "（仅展示，未过回测验收线）"
+        elif lt["state"] == "risk_off":
+            seg += f" → {lt['advice_off']}"
+        if lt["raw_today"] != (lt["state"] == "risk_off"):
+            left = max(1, lt["confirm_days"] - lt["raw_streak"])
+            flip = "🔴" if lt["state"] == "risk_on" else "🟢"
+            seg += f"（翻转信号第 {lt['raw_streak']} 天，再 {left} 天确认转 {flip}）"
+        lines.append(seg)
+    return lines
 
 
 def format_brief(b: dict) -> str:
@@ -88,6 +151,7 @@ def format_brief(b: dict) -> str:
         rise = b["ma200"] / b["hs300_close"] - 1
         lines.append(f"  → 距离恢复线: 需涨 {rise:+.1%} 收复 MA200，"
                      f"之后还需连续 {b['confirm_days']} 日确认才转 🟢")
+    lines += _format_lights(b)
     hit = b["spx_overnight"] <= b["spx_threshold"]
     lines += [
         "",
@@ -119,6 +183,22 @@ def append_signal_log(path: Path, b: dict) -> None:
         path.write_text(content + line)
 
 
+def append_lights_log(path: Path, b: dict) -> None:
+    """结构灯信号流水（长表 date,light,state,raw_today,close,ma_days），同日重跑去重。"""
+    lights = b.get("lights") or []
+    if not lights:
+        return
+    rows = "".join(
+        f"{b['date']},{lt['symbol']},{lt['state']},{int(lt['raw_today'])},"
+        f"{lt['close']:.1f},{lt['ma_days']}\n" for lt in lights)
+    if not path.exists():
+        path.write_text("date,light,state,raw_today,close,ma_days\n" + rows)
+        return
+    content = path.read_text()
+    if f"{b['date']}," not in content:
+        path.write_text(content + rows)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, default=None)
@@ -145,6 +225,7 @@ def main() -> int:
             (args.out_dir / f"brief_{stamp}.md").write_text(text + "\n")
             (args.out_dir / "latest.md").write_text(text + "\n")
             append_signal_log(args.out_dir / "signal_log.csv", b)
+            append_lights_log(args.out_dir / "lights_log.csv", b)
         else:
             # 失败不覆盖 latest.md——保留最后一次有效建议（红灯日被"生成失败"顶掉=真金白银的风险）
             (args.out_dir / f"brief_{stamp}_failed.md").write_text(text + "\n")
