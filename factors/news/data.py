@@ -1,4 +1,4 @@
-"""多源新闻流: 财联社 + 同花顺 + 新浪 → 累积到 cache.
+"""多源新闻流: 东财 + 富途 + 同花顺 + 新浪 → 累积到 cache.
 
 每个源每次只能拉到最新 ~20 条, 必须按天累积, 才能形成 3-7 天滑窗.
 """
@@ -22,10 +22,12 @@ def _normalize(df: pd.DataFrame, source: str) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["ts", "title", "content", "source"])
     out = pd.DataFrame()
-    if source == "cls":
-        out["ts"] = pd.to_datetime(
-            df["发布日期"].astype(str) + " " + df["发布时间"].astype(str),
-            errors="coerce")
+    if source == "em":
+        out["ts"] = pd.to_datetime(df["发布时间"], errors="coerce")
+        out["title"] = df["标题"].fillna("").astype(str)
+        out["content"] = df["摘要"].fillna("").astype(str)
+    elif source == "futu":
+        out["ts"] = pd.to_datetime(df["发布时间"], errors="coerce")
         out["title"] = df["标题"].fillna("").astype(str)
         out["content"] = df["内容"].fillna("").astype(str)
     elif source == "ths":
@@ -45,7 +47,9 @@ def fetch_global_news() -> pd.DataFrame:
     if ak is None:
         return pd.DataFrame()
     parts = []
-    for src, fn_name in [("cls", "stock_info_global_cls"),
+    # cls(财联社) API 自 2026-07 起 404(akshare 1.18.64 仍未修复), 换 em(东财)+futu(富途)
+    for src, fn_name in [("em", "stock_info_global_em"),
+                         ("futu", "stock_info_global_futu"),
                          ("ths", "stock_info_global_ths"),
                          ("sina", "stock_info_global_sina")]:
         try:
@@ -82,10 +86,10 @@ def append_to_history(df: pd.DataFrame) -> int:
     combined["dedup_key"] = (combined["ts"].dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
                              + "|" + combined["title"].fillna("").astype(str).str.slice(0, 60))
     combined = combined.drop_duplicates(subset=["dedup_key"], keep="first").drop(columns="dedup_key")
+    new_count = len(combined) - len(old)  # 在 30 天裁剪前计数, 否则裁剪量会被算成负新增
     # 仅保留近 30 天, 控制文件大小
     cutoff = pd.Timestamp.today() - pd.Timedelta(days=30)
     combined = combined[combined["ts"] >= cutoff].sort_values("ts").reset_index(drop=True)
-    new_count = len(combined) - len(old)
     combined.to_csv(HISTORY_CSV, index=False)
     return new_count
 
