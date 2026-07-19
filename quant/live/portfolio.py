@@ -72,12 +72,16 @@ def load_kline(symbol: str, today: pd.Timestamp) -> tuple[pd.DataFrame, bool]:
         try:
             import akshare as ak
 
+            # 400 日历日 ≈ 270 交易日：抄底灯的 dd120+信号窗要 140 根，无缓存也够
             prefix = "sh" if symbol.startswith("6") else "sz"
             fresh = ak.stock_zh_a_daily(symbol=f"{prefix}{symbol}", adjust="qfq",
-                                        start_date=(today - pd.Timedelta(days=120)).strftime("%Y%m%d"),
+                                        start_date=(today - pd.Timedelta(days=400)).strftime("%Y%m%d"),
                                         end_date=today.strftime("%Y%m%d"))
             fresh["date"] = pd.to_datetime(fresh["date"])
-            df = fresh.sort_values("date").reset_index(drop=True)
+            fresh = fresh.sort_values("date")
+            if not df.empty:  # 与旧缓存拼接保长历史（除权日复权口径或有微差，以新段为准）
+                fresh = pd.concat([df[df["date"] < fresh["date"].iloc[0]], fresh])
+            df = fresh.reset_index(drop=True)
         except Exception:
             pass  # 现拉也失败 → 返回旧数据（stale=True 由调用方标 ⚠️）
     return df, stale

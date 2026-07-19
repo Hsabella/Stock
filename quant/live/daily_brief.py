@@ -271,7 +271,8 @@ def _format_stock_lamps(b: dict) -> list[str]:
         lines.append("  窗口: 中证1000 🟢 —— 绿灯期独跌票无超额，以下触发仅记录、不建议入场")
     for r in fired:
         note = "（EXITED，接回归回补观察）" if r["state"] == "EXITED" else ""
-        lines.append(f"  🟢 {r['name']} {r['symbol']} {'+'.join(r['signals'])} "
+        names = "+".join(s["signal"] for s in r["signals"])
+        lines.append(f"  🟢 {r['name']} {r['symbol']} {names} "
                      f"收盘{r['close']:.2f} 距高{r['dd120']:+.0%} RSI{r['rsi']:.0f}{note}")
     if not fired:
         lines.append("  今日无触发")
@@ -355,24 +356,25 @@ def append_lights_log(path: Path, b: dict) -> None:
 
 
 def append_stock_lamps_log(path: Path, b: dict) -> None:
-    """个股抄底灯流水（仅非持仓的 🟢 触发行 + 当日中证1000灯色），同日重跑去重。"""
+    """个股抄底灯流水：每 (信号日,代码,信号) 只落一行——灯展示 FIRE_WINDOW 天，
+    按晨报日去重会把同一事件记 3 遍、对账 3 倍计数。仅记非持仓的 🟢 触发。"""
     sl = b.get("stock_lamps") or {}
     fired = [r for r in (sl.get("rows") or [])
              if not r.get("error") and r.get("lamp") == "fire" and r.get("state") != "HELD"]
     if not fired:
         return
     c1k = _csi1000_light(b)
-    rows = "".join(
-        f"{b['date']},{r['symbol']},{r['state']},{'+'.join(r['signals'])},"
-        f"{r['close']:.2f},{r['dd120']:.3f},{r['rsi']:.1f},"
-        f"{c1k['state'] if c1k else ''}\n" for r in fired)
-    header = "date,symbol,wl_state,signals,close,dd120,rsi,csi1000\n"
-    if not path.exists():
-        path.write_text(header + rows)
-        return
-    content = path.read_text()
-    if f"{b['date']}," not in content:
-        path.write_text(content + rows)
+    header = "signal_date,symbol,signal,wl_state,close,dd120,rsi,csi1000,brief_date\n"
+    content = path.read_text() if path.exists() else header
+    added = ""
+    for r in fired:
+        for s in r["signals"]:
+            key = f"{s['signal_date']},{r['symbol']},{s['signal']},"
+            if key not in content and key not in added:
+                added += (f"{key}{r['state']},{r['close']:.2f},{r['dd120']:.3f},"
+                          f"{r['rsi']:.1f},{c1k['state'] if c1k else ''},{b['date']}\n")
+    if added or not path.exists():
+        path.write_text(content + added)
 
 
 def main() -> int:

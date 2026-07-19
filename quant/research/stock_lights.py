@@ -100,7 +100,6 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     c = out["close"]
     out["dd120"] = c / c.rolling(120, min_periods=60).max() - 1
     out["rsi"] = wilder_rsi(c)
-    out["ma5"] = c.rolling(5).mean()
     out["ma20"] = c.rolling(20).mean()
     out["atr"] = atr14(out["high"], out["low"], c)
     out["min20c"] = c.rolling(20).min()
@@ -131,7 +130,6 @@ def signal_frame(ind: pd.DataFrame, thr: float) -> pd.DataFrame:
     diverge = (rsi - rsi.shift(1).rolling(60).min() >= 5) & (rsi <= 40)
     r4line = ind["min20c"] + TRAIL_ATR * ind["atr"]
     ma20_flat = ind["ma20"] >= ind["ma20"].shift(3)
-    r1_two = (c > ind["ma20"]) & (c > ind["ma20"]).shift(1, fill_value=False)
     return pd.DataFrame({
         "S0基准": _fresh(setup),
         "L1接刀": _fresh(setup & below30),
@@ -147,7 +145,8 @@ def signal_frame(ind: pd.DataFrame, thr: float) -> pd.DataFrame:
 # ---------- 板块涨跌停 ----------
 
 def limit_schedule(code: str, index: pd.DatetimeIndex) -> np.ndarray:
-    """逐日涨跌停幅度（留 0.5pct buffer 在使用处减）。code 如 SH688001/SZ300724。"""
+    """逐日涨跌停判定阈值（已含 0.5pct buffer：19.5/9.5/29.5，使用处直接比较）。
+    code 如 SH688001/SZ300724。"""
     num = code[2:]
     if num.startswith("688") or code.startswith("BJ"):
         return np.full(len(index), 0.195 if num.startswith("688") else 0.295)
@@ -191,7 +190,8 @@ def event_rows(inst: str, ind: pd.DataFrame, sigs: pd.DataFrame, thr: float,
     fwd = {}
     for h in HORIZONS:
         f = np.full(n, np.nan)
-        f[: n - 1 - h] = open_[1 + h:] / open_[1: n - h] - 1
+        if n - 1 - h > 0:  # 负切片会回绕，K线短于 horizon 时跳过主段
+            f[: n - 1 - h] = open_[1 + h:] / open_[1: n - h] - 1
         for t in range(max(0, n - 1 - h), n - 1):  # 尾部截断：末日收盘强平
             f[t] = close[n - 1] / open_[t + 1] - 1
         fwd[h] = f
@@ -202,7 +202,9 @@ def event_rows(inst: str, ind: pd.DataFrame, sigs: pd.DataFrame, thr: float,
     for style in STYLES:
         sig = sigs[style].to_numpy() & eval_ok
         for t in spaced_events(sig, EVENT_SPACING):
-            e = min(t + 1, n - 1)  # 灯用入场日早晨可见口径
+            if t + 1 >= n:
+                continue  # 末根K线信号无入场日，全 NaN 行只会污染 win 分母
+            e = t + 1  # 灯用入场日早晨可见口径
             row = {"instrument": inst, "style": style, "thr": thr,
                    "date": str(ind.index[t].date()),
                    "hs300_green": bool(gmap["hs300"][e]),
@@ -235,7 +237,7 @@ def simulate(ind: pd.DataFrame, sig: np.ndarray, allowed: np.ndarray, stop_kind:
             continue
         e = t + 1
         o = open_[e]
-        if (not np.isfinite(o) or vol[e] <= 0 or abs(o / close[t] - 1) >= limits[e] - 0.005
+        if (not np.isfinite(o) or vol[e] <= 0 or abs(o / close[t] - 1) >= limits[e]
                 or high[e] == low[e]):
             continue  # 停牌/开盘触限/一字板（含 ST ±5% 档）不买
         stop = (o - LEFT_STOP_ATR * atr[t]) if stop_kind == "left" else o * RIGHT_STOP
@@ -253,7 +255,7 @@ def simulate(ind: pd.DataFrame, sig: np.ndarray, allowed: np.ndarray, stop_kind:
         else:
             x = exit_u + 1
             while x < n and (not np.isfinite(open_[x]) or vol[x] <= 0
-                             or open_[x] / close[x - 1] - 1 <= -(limits[x] - 0.005)
+                             or open_[x] / close[x - 1] - 1 <= -limits[x]
                              or (high[x] == low[x] and open_[x] < close[x - 1])):
                 x += 1  # 跌停开盘/一字跌停(含 ST ±5% 档)/停牌卖不出，顺延（亏损计入）
             if x < n:
@@ -515,7 +517,9 @@ def lamp_rows(today: pd.Timestamp | None = None) -> dict:
         any_stale |= stale
         ind = compute_indicators(kline.set_index("date"))
         sigs = signal_frame(ind, PRIMARY_THR)
-        fired = [s for s in LAMP_SIGNALS if bool(sigs[s].tail(FIRE_WINDOW).any())]
+        # 每个触发信号附真实信号日：展示窗口 FIRE_WINDOW 天，流水按信号日去重防重复计数
+        fired = [{"signal": s, "signal_date": str(sigs.index[sigs[s]][-1].date())}
+                 for s in LAMP_SIGNALS if bool(sigs[s].tail(FIRE_WINDOW).any())]
         in_zone = bool(ind["dd120"].rolling(CONTEXT_LOOKBACK, min_periods=1)
                        .min().iloc[-1] <= PRIMARY_THR)
         last = ind.iloc[-1]

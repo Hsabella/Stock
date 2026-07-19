@@ -228,3 +228,27 @@ def test_latest_engine_signals_parses_risks(tmp_path, monkeypatch):
     assert date == "20260715"  # 取最新一期
     assert signals["600000"]["decision"] == "DROP"
     assert len(signals["600000"]["risks"]) == 2  # 只取前两条
+
+
+def test_load_kline_stale_fallback_merges_long_history(monkeypatch, tmp_path):
+    """陈旧降级现拉成功时须与旧缓存拼接——只换短窗会把抄底灯的 140 根需求打穿。"""
+    import types
+
+    old = pd.DataFrame({
+        "date": pd.bdate_range("2024-01-01", periods=300),
+        "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 1e6})
+    (tmp_path / "600000_daily_qfq.csv").write_text(old.to_csv(index=False))
+    fresh = pd.DataFrame({
+        "date": pd.bdate_range("2025-01-01", periods=80),
+        "open": 2.0, "high": 2.1, "low": 1.9, "close": 2.0, "volume": 1e6})
+    monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
+    monkeypatch.setitem(
+        sys.modules, "akshare",
+        types.SimpleNamespace(stock_zh_a_daily=lambda **kw: fresh.copy()))
+
+    df, stale = load_kline("600000", pd.Timestamp("2025-06-01"))
+    assert stale
+    assert len(df) > 300                                   # 旧历史保留 + 新段拼上
+    assert df["date"].is_monotonic_increasing
+    assert float(df["close"].iloc[-1]) == 2.0              # 重叠段以新数据为准
+    assert (df["date"] < "2025-01-01").sum() == (old["date"] < "2025-01-01").sum()
