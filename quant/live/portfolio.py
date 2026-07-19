@@ -28,18 +28,26 @@ TRAIL_WINDOW = 20  # ATR 追踪线的滚动最高收盘窗口
 
 
 def load_portfolio_config(path: Path = WATCHLIST) -> dict:
-    """watchlist.yaml → {held, account, target_structure, hard_stop_pct, atr_k}。"""
+    """watchlist.yaml → {held, exited, account, target_structure, hard_stop_pct, atr_k, cooldown_days}。
+
+    exited 只收带 exit_date 的 EXITED 条目（回补观察跟踪对象）；
+    不带 exit_date 的视为历史清仓，不跟踪。
+    """
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
-    held = [it for it in cfg.get("watchlist", []) if it.get("state") == "HELD"]
+    items = cfg.get("watchlist", [])
+    held = [it for it in items if it.get("state") == "HELD"]
+    exited = [it for it in items if it.get("state") == "EXITED" and it.get("exit_date")]
     strategy = str(cfg.get("default_stop_strategy", "atr_2"))
     atr_k = float(strategy.split("_", 1)[1]) if strategy.startswith("atr_") else 2.0
     return {
         "held": held,
+        "exited": exited,
         "account": cfg.get("account", {}),
         "target_structure": cfg.get("target_structure", {}),
         "hard_stop_pct": float(cfg.get("hard_stop_pct", 0.08)),
         "atr_k": atr_k,
+        "cooldown_days": int(cfg.get("cooldown_days", 10)),
     }
 
 
@@ -75,13 +83,19 @@ def load_kline(symbol: str, today: pd.Timestamp) -> tuple[pd.DataFrame, bool]:
     return df, stale
 
 
+def trail_line(kline: pd.DataFrame, atr_k: float) -> float:
+    """ATR 追踪线 = 近20日最高收盘 - k×ATR14（止损与回补观察共用同一条趋势线）。"""
+    close = kline["close"].astype(float)
+    atr = _atr(kline["high"].astype(float), kline["low"].astype(float), close)
+    return float(close.tail(TRAIL_WINDOW).max() - atr_k * atr.iloc[-1])
+
+
 def stop_lines(kline: pd.DataFrame, entry_price: float, hard_stop_pct: float,
                atr_k: float) -> dict:
     """两条止损线：硬止损（成本-N%）+ ATR 追踪线（近20日最高收盘 - k×ATR14）。"""
     close = kline["close"].astype(float)
     hard = entry_price * (1 - hard_stop_pct)
-    atr = _atr(kline["high"].astype(float), kline["low"].astype(float), close)
-    trail = float(close.tail(TRAIL_WINDOW).max() - atr_k * atr.iloc[-1])
+    trail = trail_line(kline, atr_k)
     line = max(hard, trail)  # 两线取严者判"已破"
     last = float(close.iloc[-1])
     return {
@@ -167,6 +181,60 @@ def structure_drift(cfg: dict | None = None, health: dict | None = None) -> dict
         "actions": actions,
         "compliant": not actions,
     }
+
+
+NEG_DECISIONS = ("DROP", "STOP", "REDUCE")
+
+
+def reentry_watch(cfg: dict | None = None, today: pd.Timestamp | None = None,
+                  lights: list[dict] | None = None) -> dict:
+    """晨报【回补观察】数据：止损卖出票（EXITED+exit_date）的接回三条件 + 冷静期。
+
+    三条件：①对应结构灯转绿（688xxx→科创50，其余→中证1000；lights 缺失时未知）
+    ②收盘价站回 ATR 追踪线（让股价自证跌完，而不是猜底）
+    ③引擎最新信号非 DROP/STOP/REDUCE 且风险项无"板块…弱势"（匹配自家引擎的固定文案）。
+    ready = 三条件全为 True 且冷静期已满；未知(None)按未满足处理——宁可晚接，不抢跑。
+    冷静期按自然工作日近似交易日（与 load_kline 的陈旧判定同一口径）。
+    """
+    cfg = cfg or load_portfolio_config()
+    today = today or pd.Timestamp.today().normalize()
+    signals, sig_date = latest_engine_signals()
+    light_by_symbol = {lt["symbol"]: lt for lt in (lights or [])}
+    rows, any_stale = [], False
+    for it in cfg["exited"]:
+        sym = str(it["symbol"]).zfill(6)
+        base = {"symbol": sym, "name": it.get("name", sym),
+                "exit_date": str(it["exit_date"]), "exit_price": it.get("exit_price")}
+        kline, stale = load_kline(sym, today)
+        if kline.empty or len(kline) < ATR_N + 1:
+            rows.append({**base, "error": "无K线数据"})
+            continue
+        any_stale |= stale
+        elapsed = max(0, len(pd.bdate_range(pd.Timestamp(it["exit_date"]), today)) - 1)
+        last = float(kline["close"].astype(float).iloc[-1])
+        trail = trail_line(kline, cfg["atr_k"])
+        light = light_by_symbol.get("sh000688" if sym.startswith("688") else "sh000852")
+        sig = signals.get(sym, {})
+        decision = sig.get("decision", "")
+        sector_weak = any("板块" in r and "弱势" in r for r in sig.get("risks", []))
+        conds = {
+            "light_ok": None if light is None else light["state"] == "risk_on",
+            "trend_ok": last >= trail,
+            "engine_ok": (None if not decision
+                          else decision not in NEG_DECISIONS and not sector_weak),
+        }
+        rows.append({
+            **base, "stale": stale, "close": last,
+            "trail": trail, "trail_dist": last / trail - 1,
+            "cooldown_elapsed": elapsed, "cooldown_total": cfg["cooldown_days"],
+            "cooldown_done": elapsed >= cfg["cooldown_days"],
+            "light_name": light["name"] if light else "",
+            "decision": decision, "sector_weak": sector_weak, **conds,
+            "met": sum(1 for v in conds.values() if v is True),
+            "ready": (all(v is True for v in conds.values())
+                      and elapsed >= cfg["cooldown_days"]),
+        })
+    return {"rows": rows, "signal_date": sig_date, "any_stale": any_stale}
 
 
 def holdings_health(cfg: dict | None = None, today: pd.Timestamp | None = None) -> dict:
