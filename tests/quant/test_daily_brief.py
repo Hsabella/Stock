@@ -171,11 +171,14 @@ def test_lights_log_dedupes(monkeypatch, tmp_path):
 
 FAKE_STOCK_LAMPS = {"any_stale": False, "thr": -0.35, "rows": [
     {"symbol": "002074", "name": "国轩高科", "state": "WATCHING", "stale": False,
-     "lamp": "fire", "signals": ["L6超卖修复"], "close": 26.91, "dd120": -0.35, "rsi": 44.6},
+     "lamp": "fire", "signals": [{"signal": "L6超卖修复", "signal_date": "2026-07-11"}],
+     "close": 26.91, "dd120": -0.35, "rsi": 44.6},
     {"symbol": "002639", "name": "雪人集团", "state": "HELD", "stale": False,
-     "lamp": "fire", "signals": ["L1接刀"], "close": 11.14, "dd120": -0.52, "rsi": 28.1},
+     "lamp": "fire", "signals": [{"signal": "L1接刀", "signal_date": "2026-07-11"}],
+     "close": 11.14, "dd120": -0.52, "rsi": 28.1},
     {"symbol": "601611", "name": "中国核建", "state": "EXITED", "stale": False,
-     "lamp": "fire", "signals": ["L1接刀"], "close": 9.70, "dd120": -0.49, "rsi": 35.6},
+     "lamp": "fire", "signals": [{"signal": "L1接刀", "signal_date": "2026-07-10"}],
+     "close": 9.70, "dd120": -0.49, "rsi": 35.6},
     {"symbol": "002466", "name": "天齐锂业", "state": "WATCHING", "stale": False,
      "lamp": "watch", "signals": [], "close": 46.99, "dd120": -0.42, "rsi": 32.4},
 ]}
@@ -209,13 +212,16 @@ def test_stock_lamps_error_degrades_without_killing_main_light():
     assert "⚠️ 个股抄底灯生成失败" in text and "🟢 正常" in text
 
 
-def test_stock_lamps_log_dedupes_and_excludes_held(monkeypatch, tmp_path):
+def test_stock_lamps_log_dedupes_by_signal_date_and_excludes_held(monkeypatch, tmp_path):
     fake = dict(FAKE, lights=[_c1k("risk_off")],
                 stock_lamps={**FAKE_STOCK_LAMPS, "rows": [dict(r) for r in FAKE_STOCK_LAMPS["rows"]]})
     assert _run(monkeypatch, tmp_path, lambda: dict(fake)) == 0
-    assert _run(monkeypatch, tmp_path, lambda: dict(fake)) == 0  # 同日重跑
+    assert _run(monkeypatch, tmp_path, lambda: dict(fake)) == 0          # 同日重跑
+    # 次日晨报同一信号仍在 FIRE_WINDOW 展示窗口内 → 不得再落一行（防对账 3 倍计数）
+    assert _run(monkeypatch, tmp_path, lambda: dict(fake, date="2026-07-14")) == 0
     log = (tmp_path / "stock_lamps_log.csv").read_text().strip().splitlines()
-    assert log[0] == "date,symbol,wl_state,signals,close,dd120,rsi,csi1000"
+    assert log[0] == "signal_date,symbol,signal,wl_state,close,dd120,rsi,csi1000,brief_date"
     assert len(log) == 3                              # 表头 + 国轩高科 + 中国核建
     assert not any("002639" in ln for ln in log)      # HELD 不落流水
-    assert log[1].endswith("risk_off")
+    assert log[1].startswith("2026-07-11,002074,L6超卖修复,")
+    assert log[1].endswith(",risk_off,2026-07-13")

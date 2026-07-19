@@ -117,3 +117,31 @@ def test_lamp_rows_uses_kline_and_flags_fire(monkeypatch, tmp_path):
     assert by_sym["000001"]["error"] == "K线不足"
     assert by_sym["002074"]["lamp"] in ("fire", "watch")       # 深跌必在灯上
     assert by_sym["002074"]["dd120"] < -0.35
+
+
+def test_event_rows_survives_kline_shorter_than_horizon():
+    """K线短于最长 horizon(60) 时主切片负索引会回绕——须有防护不崩。"""
+    ind = sl.compute_indicators(_mk([100.0] * 50))
+    sigs = sl.signal_frame(ind, thr=-0.35)
+    gmap = {"hs300": np.zeros(50, dtype=bool), "csi1000": np.zeros(50, dtype=bool)}
+    rows = sl.event_rows("SH600000", ind, sigs, -0.35, gmap,
+                         np.ones(50, dtype=bool), np.zeros(50, dtype=bool))
+    assert rows == []  # 平盘无 setup，无事件；关键是不抛 ValueError
+
+
+def test_lamp_rows_fired_carries_signal_date(monkeypatch, tmp_path):
+    wl = tmp_path / "watchlist.yaml"
+    wl.write_text("watchlist:\n  - { symbol: \"002074\", name: \"国轩高科\", state: \"WATCHING\" }\n",
+                  encoding="utf-8")
+    monkeypatch.setattr(sl, "REPO", tmp_path)
+    crash = _mk(_crash_path()).reset_index(names="date")
+    from quant.live import portfolio
+    monkeypatch.setattr(portfolio, "load_kline", lambda sym, today: (crash, False))
+
+    out = sl.lamp_rows(today=pd.Timestamp("2024-08-01"))
+    row = out["rows"][0]
+    if row["lamp"] == "fire":  # 深跌路径 L1 在窗口内触发时必须带信号日
+        for s in row["signals"]:
+            assert set(s) == {"signal", "signal_date"}
+            assert s["signal"] in ("L1接刀", "L6超卖修复")
+            pd.Timestamp(s["signal_date"])  # 可解析日期
