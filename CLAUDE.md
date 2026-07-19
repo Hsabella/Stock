@@ -1,6 +1,6 @@
 # CLAUDE.md — Stock 多维决策引擎
 
-A 股自选股决策引擎：收盘后从 8 个维度给 watchlist 打分 + 状态机出 BUY/HOLD/REDUCE/STOP 建议，**非自动交易系统**（最终下单由人拍板）。详细用法看 [USAGE.md](./USAGE.md)，术语看 [GLOSSARY.md](./GLOSSARY.md)。
+A 股自选股决策引擎：收盘后从 8 个维度给 watchlist 打分 + 状态机出 BUY/HOLD/REDUCE/STOP 建议，**非自动交易系统**（最终下单由人拍板）。**用户日常操作手册看 [LIGHTS.md](./LIGHTS.md)（红绿灯体系，主用）**，旧引擎用法看 [USAGE.md](./USAGE.md)，术语看 [GLOSSARY.md](./GLOSSARY.md)。
 
 > **2026-07 重构（quant/ 新系统）**：watchlist 打分器收益已证伪（38 天全样本 BUY 组合 -11.9% 跑输自选池），项目重构为 qlib 量化系统，见下方 quant 段落与 [docs/quant/phase1_report.md](./docs/quant/phase1_report.md)。旧引擎照跑到二期切换。
 
