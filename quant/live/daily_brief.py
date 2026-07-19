@@ -118,7 +118,23 @@ def brief(today: pd.Timestamp | None = None) -> dict:
         out["structure"] = structure_drift(health=out.get("holdings"))
     except Exception as e:
         out["structure_error"] = f"{type(e).__name__}: {e}"
+    try:
+        from quant.live.portfolio import reentry_watch
+
+        out["reentry"] = reentry_watch(today=today, lights=out.get("lights"))
+    except Exception as e:
+        out["reentry_error"] = f"{type(e).__name__}: {e}"
+    try:
+        from quant.research.stock_lights import lamp_rows
+
+        out["stock_lamps"] = lamp_rows(today=today)
+    except Exception as e:
+        out["stock_lamps_error"] = f"{type(e).__name__}: {e}"
     return out
+
+
+def _csi1000_light(b: dict) -> dict | None:
+    return next((lt for lt in b.get("lights") or [] if lt["symbol"] == "sh000852"), None)
 
 
 def _format_lights(b: dict) -> list[str]:
@@ -195,6 +211,77 @@ def _format_structure(b: dict) -> list[str]:
     return lines
 
 
+def _mark(ok: bool | None) -> str:
+    return "✅" if ok is True else "⚠️" if ok is None else "❌"
+
+
+def _format_reentry(b: dict) -> list[str]:
+    if "reentry_error" in b:
+        return ["", f"⚠️ 回补观察生成失败: {b['reentry_error']}"]
+    w = b.get("reentry")
+    if not w or not w["rows"]:
+        return []
+    head = "【回补观察】止损卖出票的接回条件（三条全✅且过冷静期才考虑，接回按单票≤10%）"
+    if w["any_stale"]:
+        head += " ⚠️ 部分K线陈旧"
+    lines = ["", head]
+    for r in w["rows"]:
+        if r.get("error"):
+            lines.append(f"  {r['name']} {r['symbol']} ⚠️ {r['error']}")
+            continue
+        price = (f"卖{r['exit_price']:.2f} 现{r['close']:.2f}" if r.get("exit_price")
+                 else f"现{r['close']:.2f}")
+        cool = ("冷静期已过" if r["cooldown_done"]
+                else f"冷静期 {r['cooldown_elapsed']}/{r['cooldown_total']}")
+        seg = (f"  {r['name']} {r['symbol']} {price} | {cool}"
+               f" | ①{r['light_name'] or '结构灯'}{_mark(r['light_ok'])}"
+               f" ②站回趋势线{r['trail']:.2f}{_mark(r['trend_ok'])}({r['trail_dist']:+.1%})"
+               f" ③引擎{r['decision'] or '无信号'}"
+               f"{'·板块弱' if r.get('sector_weak') else ''}{_mark(r['engine_ok'])}"
+               f" → {r['met']}/3")
+        if r["ready"]:
+            seg += " ✅ 条件齐备，可按新仓规则考虑接回"
+        lines.append(seg)
+    return lines
+
+
+def _format_stock_lamps(b: dict) -> list[str]:
+    if "stock_lamps_error" in b:
+        return ["", f"⚠️ 个股抄底灯生成失败: {b['stock_lamps_error']}"]
+    sl = b.get("stock_lamps")
+    if not sl or not sl["rows"]:
+        return []
+    rows = [r for r in sl["rows"] if not r.get("error")]
+    errors = len(sl["rows"]) - len(rows)
+    # 持仓票不列入：灯只管新钱入场，防止被误读成补仓依据
+    fired = [r for r in rows if r["lamp"] == "fire" and r["state"] != "HELD"]
+    zone = sum(1 for r in rows if r["lamp"] == "watch")
+    head = (f"【个股抄底灯】setup=距120日高≤{sl['thr']:.0%} · 左侧L6/L1"
+            f"（回测定案: docs/quant/stock_lights_report.md）")
+    if sl["any_stale"]:
+        head += " ⚠️ 部分K线陈旧"
+    lines = ["", head]
+    c1k = _csi1000_light(b)
+    if c1k is None:
+        lines.append("  窗口: ⚠️ 中证1000灯缺失——触发仅记录")
+    elif c1k["state"] == "risk_off":
+        lines.append("  窗口: 中证1000 🔴 恐慌期=左侧超额最大 → 可按纪律执行"
+                     "（单票半仓≤5% · 止损=入场价-3×ATR14 · 并发新仓≤3只）")
+    else:
+        lines.append("  窗口: 中证1000 🟢 —— 绿灯期独跌票无超额，以下触发仅记录、不建议入场")
+    for r in fired:
+        note = "（EXITED，接回归回补观察）" if r["state"] == "EXITED" else ""
+        lines.append(f"  🟢 {r['name']} {r['symbol']} {'+'.join(r['signals'])} "
+                     f"收盘{r['close']:.2f} 距高{r['dd120']:+.0%} RSI{r['rsi']:.0f}{note}")
+    if not fired:
+        lines.append("  今日无触发")
+    tail = f"  （🟡底部区观察 {zone} 只；持仓票不列入——灯只管新钱，不是补仓依据）"
+    if errors:
+        tail += f" ⚠️ {errors}只K线不足"
+    lines.append(tail)
+    return lines
+
+
 def format_brief(b: dict) -> str:
     green = b["state"] == "risk_on"
     tone = "🟢 正常" if green else "🔴 防守"
@@ -229,6 +316,8 @@ def format_brief(b: dict) -> str:
                       f"{'——可提前想好减仓动作' if green else ''}"]
     lines += _format_holdings(b)
     lines += _format_structure(b)
+    lines += _format_reentry(b)
+    lines += _format_stock_lamps(b)
     lines += [
         "",
         f"【规则】趋势级过滤器，单日涨跌不触发：跌破 MA200 或 隔夜标普≤{b['spx_threshold']:.1%}，"
@@ -265,6 +354,27 @@ def append_lights_log(path: Path, b: dict) -> None:
         path.write_text(content + rows)
 
 
+def append_stock_lamps_log(path: Path, b: dict) -> None:
+    """个股抄底灯流水（仅非持仓的 🟢 触发行 + 当日中证1000灯色），同日重跑去重。"""
+    sl = b.get("stock_lamps") or {}
+    fired = [r for r in (sl.get("rows") or [])
+             if not r.get("error") and r.get("lamp") == "fire" and r.get("state") != "HELD"]
+    if not fired:
+        return
+    c1k = _csi1000_light(b)
+    rows = "".join(
+        f"{b['date']},{r['symbol']},{r['state']},{'+'.join(r['signals'])},"
+        f"{r['close']:.2f},{r['dd120']:.3f},{r['rsi']:.1f},"
+        f"{c1k['state'] if c1k else ''}\n" for r in fired)
+    header = "date,symbol,wl_state,signals,close,dd120,rsi,csi1000\n"
+    if not path.exists():
+        path.write_text(header + rows)
+        return
+    content = path.read_text()
+    if f"{b['date']}," not in content:
+        path.write_text(content + rows)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, default=None)
@@ -292,6 +402,7 @@ def main() -> int:
             (args.out_dir / "latest.md").write_text(text + "\n")
             append_signal_log(args.out_dir / "signal_log.csv", b)
             append_lights_log(args.out_dir / "lights_log.csv", b)
+            append_stock_lamps_log(args.out_dir / "stock_lamps_log.csv", b)
         else:
             # 失败不覆盖 latest.md——保留最后一次有效建议（红灯日被"生成失败"顶掉=真金白银的风险）
             (args.out_dir / f"brief_{stamp}_failed.md").write_text(text + "\n")
