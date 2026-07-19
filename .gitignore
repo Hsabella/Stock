@@ -42,7 +42,14 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 logs/
-results/
+# results 整体忽略，但豁免晨报三份信号流水（实盘对账原始证据，防本地丢失）。
+# git 无法豁免"被忽略目录"内的文件，故用 results/* 忽略内容而非目录本身，再逐层放行
+results/*
+!results/brief/
+results/brief/*
+!results/brief/signal_log.csv
+!results/brief/lights_log.csv
+!results/brief/stock_lamps_log.csv
 
 # Translations
 *.mo
