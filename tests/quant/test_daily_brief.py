@@ -126,6 +126,40 @@ def test_holdings_error_degrades_without_killing_main_light():
     assert "⚠️ 持仓健康度生成失败" in text and "🟢 正常" in text
 
 
+FAKE_REENTRY = {"signal_date": "20260715", "any_stale": False, "rows": [
+    {"symbol": "002842", "name": "翔鹭钨业", "exit_date": "2026-07-17", "exit_price": 35.96,
+     "stale": False, "close": 34.10, "trail": 38.20, "trail_dist": -0.1073,
+     "cooldown_elapsed": 3, "cooldown_total": 10, "cooldown_done": False,
+     "light_name": "中证1000", "decision": "DROP", "sector_weak": True,
+     "light_ok": False, "trend_ok": False, "engine_ok": False, "met": 0, "ready": False},
+    {"symbol": "002639", "name": "雪人集团", "exit_date": "2026-07-01", "exit_price": 12.50,
+     "stale": False, "close": 13.80, "trail": 13.10, "trail_dist": 0.0534,
+     "cooldown_elapsed": 12, "cooldown_total": 10, "cooldown_done": True,
+     "light_name": "中证1000", "decision": "HOLD",
+     "light_ok": True, "trend_ok": True, "engine_ok": True, "met": 3, "ready": True},
+]}
+
+
+def test_format_reentry_shows_conditions_and_ready():
+    text = daily_brief.format_brief(dict(FAKE, reentry=FAKE_REENTRY))
+    assert "【回补观察】" in text
+    assert "翔鹭钨业 002842 卖35.96 现34.10" in text
+    assert "冷静期 3/10" in text and "①中证1000❌" in text
+    assert "②站回趋势线38.20❌(-10.7%)" in text and "③引擎DROP·板块弱❌" in text and "→ 0/3" in text
+    assert "雪人集团" in text and "冷静期已过" in text
+    assert "→ 3/3 ✅ 条件齐备" in text
+
+
+def test_format_reentry_hidden_when_no_exited():
+    text = daily_brief.format_brief(dict(FAKE, reentry={"rows": [], "signal_date": "", "any_stale": False}))
+    assert "【回补观察】" not in text
+
+
+def test_reentry_error_degrades_without_killing_main_light():
+    text = daily_brief.format_brief(dict(FAKE, reentry_error="RuntimeError: x"))
+    assert "⚠️ 回补观察生成失败" in text and "🟢 正常" in text
+
+
 def test_lights_log_dedupes(monkeypatch, tmp_path):
     fake = dict(FAKE, lights=[dict(x) for x in FAKE_LIGHTS])
     assert _run(monkeypatch, tmp_path, lambda: dict(fake)) == 0
@@ -133,3 +167,55 @@ def test_lights_log_dedupes(monkeypatch, tmp_path):
     log = (tmp_path / "lights_log.csv").read_text().strip().splitlines()
     assert log[0] == "date,light,state,raw_today,close,ma_days"
     assert len(log) == 3  # 表头 + 两盏灯各一行
+
+
+FAKE_STOCK_LAMPS = {"any_stale": False, "thr": -0.35, "rows": [
+    {"symbol": "002074", "name": "国轩高科", "state": "WATCHING", "stale": False,
+     "lamp": "fire", "signals": ["L6超卖修复"], "close": 26.91, "dd120": -0.35, "rsi": 44.6},
+    {"symbol": "002639", "name": "雪人集团", "state": "HELD", "stale": False,
+     "lamp": "fire", "signals": ["L1接刀"], "close": 11.14, "dd120": -0.52, "rsi": 28.1},
+    {"symbol": "601611", "name": "中国核建", "state": "EXITED", "stale": False,
+     "lamp": "fire", "signals": ["L1接刀"], "close": 9.70, "dd120": -0.49, "rsi": 35.6},
+    {"symbol": "002466", "name": "天齐锂业", "state": "WATCHING", "stale": False,
+     "lamp": "watch", "signals": [], "close": 46.99, "dd120": -0.42, "rsi": 32.4},
+]}
+
+
+def _c1k(state):
+    return dict(FAKE_LIGHTS[0], state=state)
+
+
+def test_format_stock_lamps_red_window_lists_fires_excludes_held():
+    b = dict(FAKE, lights=[_c1k("risk_off")],
+             stock_lamps={**FAKE_STOCK_LAMPS, "rows": [dict(r) for r in FAKE_STOCK_LAMPS["rows"]]})
+    text = daily_brief.format_brief(b)
+    assert "【个股抄底灯】" in text and "≤-35%" in text
+    assert "恐慌期=左侧超额最大" in text and "止损=入场价-3×ATR14" in text
+    assert "🟢 国轩高科 002074 L6超卖修复" in text
+    assert "雪人集团" not in text                      # HELD 触发不列入（防误读为补仓）
+    assert "中国核建" in text and "接回归回补观察" in text
+    assert "🟡底部区观察 1 只" in text
+
+
+def test_format_stock_lamps_green_window_downgrades_to_record_only():
+    b = dict(FAKE, lights=[_c1k("risk_on")],
+             stock_lamps={**FAKE_STOCK_LAMPS, "rows": [dict(r) for r in FAKE_STOCK_LAMPS["rows"]]})
+    text = daily_brief.format_brief(b)
+    assert "绿灯期独跌票无超额" in text and "仅记录、不建议入场" in text
+
+
+def test_stock_lamps_error_degrades_without_killing_main_light():
+    text = daily_brief.format_brief(dict(FAKE, stock_lamps_error="RuntimeError: x"))
+    assert "⚠️ 个股抄底灯生成失败" in text and "🟢 正常" in text
+
+
+def test_stock_lamps_log_dedupes_and_excludes_held(monkeypatch, tmp_path):
+    fake = dict(FAKE, lights=[_c1k("risk_off")],
+                stock_lamps={**FAKE_STOCK_LAMPS, "rows": [dict(r) for r in FAKE_STOCK_LAMPS["rows"]]})
+    assert _run(monkeypatch, tmp_path, lambda: dict(fake)) == 0
+    assert _run(monkeypatch, tmp_path, lambda: dict(fake)) == 0  # 同日重跑
+    log = (tmp_path / "stock_lamps_log.csv").read_text().strip().splitlines()
+    assert log[0] == "date,symbol,wl_state,signals,close,dd120,rsi,csi1000"
+    assert len(log) == 3                              # 表头 + 国轩高科 + 中国核建
+    assert not any("002639" in ln for ln in log)      # HELD 不落流水
+    assert log[1].endswith("risk_off")
