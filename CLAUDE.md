@@ -13,6 +13,8 @@ A 股自选股决策引擎：收盘后从 8 个维度给 watchlist 打分 + 状�
                                                       #  2026-07-16 起含结构灯/持仓健康度/结构修正跟踪,
                                                       #  2026-07-17 起含回补观察(EXITED+exit_date 票的接回三条件),
                                                       #  2026-07-19 起含个股抄底灯(左侧L6/L1, 落 stock_lamps_log.csv),
+                                                      #  2026-07-20 起含ETF观察(51x/56x/58x/159x 自动识别, 趋势读数无信号;
+                                                      #  东财qfq口径——新浪ETF接口不复权禁用; 主题ETF HELD 计入卫星限额),
                                                       #  灯参数经回测定案 docs/quant/timing_lights_report.md,
                                                       #  持仓与账户配置在 watchlist.yaml 顶层 account 段)
 .venv-quant/bin/python -m quant.research.timing_lights # 结构灯敏感性回测(改灯参数前必跑)

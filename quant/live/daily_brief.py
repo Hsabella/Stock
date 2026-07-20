@@ -125,6 +125,12 @@ def brief(today: pd.Timestamp | None = None) -> dict:
     except Exception as e:
         out["reentry_error"] = f"{type(e).__name__}: {e}"
     try:
+        from quant.live.portfolio import etf_watch
+
+        out["etf_watch"] = etf_watch(today=today)
+    except Exception as e:
+        out["etf_watch_error"] = f"{type(e).__name__}: {e}"
+    try:
         from quant.research.stock_lights import lamp_rows
 
         out["stock_lamps"] = lamp_rows(today=today)
@@ -177,7 +183,8 @@ def _format_holdings(b: dict) -> list[str]:
             continue
         stop = (f"止损线 {r['stop_line']:.2f} 已破❗"
                 if r["broken"] else f"止损线 {r['stop_line']:.2f}（距离 {r['dist_pct']:+.1%}）")
-        seg = (f"  {r['name']} {r['symbol']} {r['close']:.2f}/{r['entry']:.2f} "
+        tag = "[ETF] " if r.get("etf") else ""
+        seg = (f"  {r['name']} {r['symbol']} {tag}{r['close']:.2f}/{r['entry']:.2f} "
                f"{r['pnl_pct']:+.1%} | {stop}")
         if r["decision"] in ("REDUCE", "DROP", "STOP", "TAKE"):
             seg += f" | 引擎:{r['decision']}"
@@ -242,6 +249,29 @@ def _format_reentry(b: dict) -> list[str]:
         if r["ready"]:
             seg += " ✅ 条件齐备，可按新仓规则考虑接回"
         lines.append(seg)
+    return lines
+
+
+def _format_etf_watch(b: dict) -> list[str]:
+    if "etf_watch_error" in b:
+        return ["", f"⚠️ ETF观察生成失败: {b['etf_watch_error']}"]
+    w = b.get("etf_watch")
+    if not w or not w["rows"]:
+        return []
+    head = "【ETF观察】趋势读数，无买卖信号（抄底灯未在 ETF 上回测，不适用）"
+    if w["any_stale"]:
+        head += " ⚠️ 部分K线陈旧"
+    lines = ["", head]
+    for r in w["rows"]:
+        if r.get("error"):
+            lines.append(f"  {r['name']} {r['symbol']} ⚠️ {r['error']}")
+            continue
+        ma = (f"MA200 {r['vs_ma200']:+.1%}" if r["vs_ma200"] is not None
+              else "MA200 -（历史不足）")
+        trend = "上方🟢" if r["above_trail"] else "下方🔴"
+        lines.append(f"  {r['name']} {r['symbol']} 收{r['close']:.3f}({r['chg_1d']:+.1%})"
+                     f" 距120日高{r['dd120']:+.0%} {ma}"
+                     f" ATR趋势线{r['trail']:.3f}{trend}")
     return lines
 
 
@@ -318,6 +348,7 @@ def format_brief(b: dict) -> str:
     lines += _format_holdings(b)
     lines += _format_structure(b)
     lines += _format_reentry(b)
+    lines += _format_etf_watch(b)
     lines += _format_stock_lamps(b)
     lines += [
         "",

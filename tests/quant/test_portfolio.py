@@ -230,6 +230,117 @@ def test_latest_engine_signals_parses_risks(tmp_path, monkeypatch):
     assert len(signals["600000"]["risks"]) == 2  # 只取前两条
 
 
+def test_is_etf_classification():
+    """沪 51x/56x/58x、深 159x 是 ETF；个股/科创/创业板不是。"""
+    for sym in ("515050", "510300", "512880", "560010", "588000", "159915"):
+        assert portfolio.is_etf(sym), sym
+    for sym in ("600000", "002842", "000001", "300724", "688001", "601698"):
+        assert not portfolio.is_etf(sym), sym
+
+
+def _etf_em_frame(dates, close=1.0):
+    """伪造 fund_etf_hist_em 返回（东财中文列名，换手率已是 %）。"""
+    n = len(dates)
+    return pd.DataFrame({
+        "日期": [str(d.date()) for d in dates],
+        "开盘": [close] * n, "收盘": [close] * n,
+        "最高": [close * 1.01] * n, "最低": [close * 0.99] * n,
+        "成交量": [1e6] * n, "成交额": [1e6 * close] * n,
+        "振幅": [2.0] * n, "涨跌幅": [0.0] * n, "涨跌额": [0.0] * n,
+        "换手率": [0.97] * n,
+    })
+
+
+def test_load_kline_etf_routes_to_em_and_writes_cache(monkeypatch, tmp_path):
+    """ETF 走 fund_etf_hist_em（股票接口被调则炸）、列名归一化、回写缓存、成功后不标陈旧。"""
+    import types
+
+    today = pd.Timestamp("2026-07-20")
+    dates = pd.bdate_range(end="2026-07-17", periods=60)  # 上一交易日=周五
+    fake = types.SimpleNamespace(
+        fund_etf_hist_em=lambda **kw: _etf_em_frame(dates),
+        stock_zh_a_daily=lambda **kw: (_ for _ in ()).throw(AssertionError("不应走股票接口")))
+    monkeypatch.setitem(sys.modules, "akshare", fake)
+    monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
+
+    df, stale = portfolio.load_kline("515050", today)
+    assert not stale                                       # 现拉拉全 = 常态路径，不标 ⚠️
+    assert list(df.columns[:5]) == ["date", "open", "high", "low", "close"]
+    assert str(df["date"].iloc[-1].date()) == "2026-07-17"
+    cached = pd.read_csv(tmp_path / "515050_daily_qfq.csv", parse_dates=["date"])
+    assert len(cached) == len(df)                          # 回写成功，次日命中缓存
+
+
+def test_load_kline_etf_stale_threshold_one_day(monkeypatch, tmp_path):
+    """同样落后 2 个交易日的缓存：ETF 触发现拉（阈值1），个股不触发（阈值3）。"""
+    import types
+
+    dates = pd.bdate_range(end="2026-07-16", periods=40)   # 缓存末日=周四
+    today = pd.Timestamp("2026-07-20")                     # 周一 → 落后 2 交易日
+    base = _kline(n=40).assign(date=dates)
+    base.to_csv(tmp_path / "515050_daily_qfq.csv", index=False)
+    base.to_csv(tmp_path / "600000_daily_qfq.csv", index=False)
+    calls = []
+    fake = types.SimpleNamespace(
+        fund_etf_hist_em=lambda **kw: calls.append("etf") or _etf_em_frame(
+            pd.bdate_range(end="2026-07-17", periods=60)),
+        stock_zh_a_daily=lambda **kw: calls.append("stock") or None)
+    monkeypatch.setitem(sys.modules, "akshare", fake)
+    monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
+
+    df, _ = portfolio.load_kline("515050", today)
+    assert calls == ["etf"]                                # ETF 现拉了
+    assert str(df["date"].iloc[-1].date()) == "2026-07-17"
+    _, stale = portfolio.load_kline("600000", today)
+    assert calls == ["etf"] and not stale                  # 个股 2 天内不算陈旧，没现拉
+
+
+def test_load_kline_etf_drops_intraday_bar(monkeypatch, tmp_path):
+    """盘中重跑：date==today 的未收线 bar 不得进缓存/返回值。"""
+    import types
+
+    today = pd.Timestamp("2026-07-20")
+    dates = pd.bdate_range(end="2026-07-20", periods=60)   # 东财盘中会带当日实时 bar
+    fake = types.SimpleNamespace(fund_etf_hist_em=lambda **kw: _etf_em_frame(dates))
+    monkeypatch.setitem(sys.modules, "akshare", fake)
+    monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
+
+    df, _ = portfolio.load_kline("515050", today)
+    assert str(df["date"].iloc[-1].date()) == "2026-07-17"  # 当日 bar 被丢弃
+
+
+def test_reentry_watch_etf_engine_condition_not_applicable(tmp_path, monkeypatch):
+    """EXITED 的 ETF：无引擎信号但条件③=满足（排雷不适用），三条件可齐。"""
+    k = _kline(n=40, close_start=100.0, step=+0.5, spread=1.0)
+    today = _setup_reentry(tmp_path, monkeypatch, k, symbol="515050")
+    exit_date = str(pd.bdate_range(end=today, periods=15)[0].date())
+    cfg = _reentry_cfg(exit_date, symbol="515050")
+    (tmp_path / "decisions" / "partial_20260715.csv").write_text("symbol,decision,dec_risks\n")
+    r = portfolio.reentry_watch(cfg=cfg, today=today, lights=LIGHTS_GREEN)["rows"][0]
+    assert r["decision"] == "" and r["engine_ok"] is True
+    assert r["light_name"] == "中证1000" and r["ready"]
+
+
+def test_etf_watch_rows(tmp_path, monkeypatch):
+    """WATCHING ETF 的趋势读数：距120日高/涨跌/趋势线；缓存新鲜时不走网络。"""
+    dates = pd.bdate_range(end="2026-07-17", periods=250)
+    close = pd.Series([1.0] * 129 + [2.0] + [1.5] * 119 + [1.2])  # 2.0 在 idx129, 已出 tail(120) 窗
+    pd.DataFrame({"date": dates, "open": close, "high": close * 1.01,
+                  "low": close * 0.99, "close": close}).to_csv(
+        tmp_path / "515050_daily_qfq.csv", index=False)
+    monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
+    cfg = {"etf_watching": [{"symbol": "515050", "name": "5G通信ETF"}], "atr_k": 2.0}
+
+    w = portfolio.etf_watch(cfg=cfg, today=pd.Timestamp("2026-07-20"))
+    r = w["rows"][0]
+    assert r["symbol"] == "515050" and not r["stale"]
+    assert abs(r["close"] - 1.2) < 1e-9
+    assert abs(r["chg_1d"] - (1.2 / 1.5 - 1)) < 1e-9
+    assert abs(r["dd120"] - (1.2 / 1.5 - 1)) < 1e-9          # 2.0 已出 120 日窗
+    assert r["vs_ma200"] is not None and r["trail"] > 0
+    assert isinstance(r["above_trail"], bool)
+
+
 def test_load_kline_stale_fallback_merges_long_history(monkeypatch, tmp_path):
     """陈旧降级现拉成功时须与旧缓存拼接——只换短窗会把抄底灯的 140 根需求打穿。"""
     import types
