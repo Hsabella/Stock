@@ -23,8 +23,16 @@ WATCHLIST = REPO / "watchlist.yaml"
 KLINE_DIR = REPO / "cache" / "kline"
 DEC_DIR = REPO / "results" / "decisions"
 STALE_TRADING_DAYS = 3
+ETF_STALE_TRADING_DAYS = 1  # ETF 缓存无旧引擎夜刷，晨报必须拿到上一交易日收盘
 ATR_N = 14
 TRAIL_WINDOW = 20  # ATR 追踪线的滚动最高收盘窗口
+ETF_PREFIXES = ("51", "56", "58", "159")  # 沪 51x/56x/58x + 深 159x；LOF/封基不算
+DD_WINDOW = 120  # ETF 观察的"距 N 日最高收盘"窗口（与抄底灯 setup 同口径，便于对照）
+
+
+def is_etf(symbol: str) -> bool:
+    """场内 ETF 代码段判定（与 factors/_kline.py 的副本保持一致，venv 隔离不互相 import）。"""
+    return str(symbol).startswith(ETF_PREFIXES)
 
 
 def load_portfolio_config(path: Path = WATCHLIST) -> dict:
@@ -38,11 +46,14 @@ def load_portfolio_config(path: Path = WATCHLIST) -> dict:
     items = cfg.get("watchlist", [])
     held = [it for it in items if it.get("state") == "HELD"]
     exited = [it for it in items if it.get("state") == "EXITED" and it.get("exit_date")]
+    etf_watching = [it for it in items
+                    if it.get("state") == "WATCHING" and is_etf(str(it["symbol"]))]
     strategy = str(cfg.get("default_stop_strategy", "atr_2"))
     atr_k = float(strategy.split("_", 1)[1]) if strategy.startswith("atr_") else 2.0
     return {
         "held": held,
         "exited": exited,
+        "etf_watching": etf_watching,
         "account": cfg.get("account", {}),
         "target_structure": cfg.get("target_structure", {}),
         "hard_stop_pct": float(cfg.get("hard_stop_pct", 0.08)),
@@ -58,8 +69,28 @@ def _atr(high, low, close, n=ATR_N):
     return tr.rolling(n).mean()
 
 
+def _fetch_etf_kline(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """东财 ETF 日线（前复权）→ 与股票缓存同列名。新浪 fund_etf_hist_sina 不复权
+    （份额拆分会把距高/MA 全算错），禁用。"""
+    import akshare as ak
+
+    df = ak.fund_etf_hist_em(symbol=symbol, period="daily",
+                             start_date=start, end_date=end, adjust="qfq")
+    df = df.rename(columns={"日期": "date", "开盘": "open", "收盘": "close", "最高": "high",
+                            "最低": "low", "成交量": "volume", "成交额": "amount",
+                            "换手率": "turnover"})
+    df = df[[c for c in ("date", "open", "high", "low", "close",
+                         "volume", "amount", "turnover") if c in df.columns]]
+    df["date"] = pd.to_datetime(df["date"])
+    return df.sort_values("date")
+
+
 def load_kline(symbol: str, today: pd.Timestamp) -> tuple[pd.DataFrame, bool]:
-    """(日K df[date/open/high/low/close], 是否陈旧)。缓存陈旧时降级 akshare 现拉。"""
+    """(日K df[date/open/high/low/close], 是否陈旧)。缓存陈旧时降级 akshare 现拉。
+
+    ETF 与个股两点不同：陈旧阈值 1 交易日（旧引擎 18:30 只刷个股缓存，ETF 缓存
+    由本层现拉回写维护）；数据源走东财 fund_etf_hist_em（qfq）。
+    """
     p = KLINE_DIR / f"{symbol}_daily_qfq.csv"
     df = pd.DataFrame()
     if p.exists():
@@ -67,21 +98,33 @@ def load_kline(symbol: str, today: pd.Timestamp) -> tuple[pd.DataFrame, bool]:
             df = pd.read_csv(p, parse_dates=["date"])
         except Exception:
             df = pd.DataFrame()
-    stale = df.empty or len(pd.bdate_range(df["date"].iloc[-1], today)) - 1 > STALE_TRADING_DAYS
+    etf = is_etf(symbol)
+    max_lag = ETF_STALE_TRADING_DAYS if etf else STALE_TRADING_DAYS
+    stale = df.empty or len(pd.bdate_range(df["date"].iloc[-1], today)) - 1 > max_lag
     if stale:
         try:
-            import akshare as ak
-
             # 400 日历日 ≈ 270 交易日：抄底灯的 dd120+信号窗要 140 根，无缓存也够
-            prefix = "sh" if symbol.startswith("6") else "sz"
-            fresh = ak.stock_zh_a_daily(symbol=f"{prefix}{symbol}", adjust="qfq",
-                                        start_date=(today - pd.Timedelta(days=400)).strftime("%Y%m%d"),
-                                        end_date=today.strftime("%Y%m%d"))
-            fresh["date"] = pd.to_datetime(fresh["date"])
-            fresh = fresh.sort_values("date")
+            start = (today - pd.Timedelta(days=400)).strftime("%Y%m%d")
+            end = today.strftime("%Y%m%d")
+            if etf:
+                fresh = _fetch_etf_kline(symbol, start, end)
+            else:
+                import akshare as ak
+
+                prefix = "sh" if symbol.startswith("6") else "sz"
+                fresh = ak.stock_zh_a_daily(symbol=f"{prefix}{symbol}", adjust="qfq",
+                                            start_date=start, end_date=end)
+                fresh["date"] = pd.to_datetime(fresh["date"])
+                fresh = fresh.sort_values("date")
+            fresh = fresh[fresh["date"] < today]  # 盘中重跑时丢掉当日未收线的 bar
             if not df.empty:  # 与旧缓存拼接保长历史（除权日复权口径或有微差，以新段为准）
                 fresh = pd.concat([df[df["date"] < fresh["date"].iloc[0]], fresh])
             df = fresh.reset_index(drop=True)
+            if etf:  # ETF 缓存归本层所有，回写后次日命中缓存不再重拉
+                KLINE_DIR.mkdir(parents=True, exist_ok=True)
+                df.to_csv(p, index=False)
+                # 晨间现拉对 ETF 是常态路径而非降级，拉全了就不标 ⚠️
+                stale = len(pd.bdate_range(df["date"].iloc[-1], today)) - 1 > max_lag
         except Exception:
             pass  # 现拉也失败 → 返回旧数据（stale=True 由调用方标 ⚠️）
     return df, stale
@@ -194,9 +237,10 @@ def reentry_watch(cfg: dict | None = None, today: pd.Timestamp | None = None,
                   lights: list[dict] | None = None) -> dict:
     """晨报【回补观察】数据：止损卖出票（EXITED+exit_date）的接回三条件 + 冷静期。
 
-    三条件：①对应结构灯转绿（688xxx→科创50，其余→中证1000；lights 缺失时未知）
+    三条件：①对应结构灯转绿（688xxx/588xxx→科创50，其余→中证1000；lights 缺失时未知）
     ②收盘价站回 ATR 追踪线（让股价自证跌完，而不是猜底）
-    ③引擎最新信号非 DROP/STOP/REDUCE 且风险项无"板块…弱势"（匹配自家引擎的固定文案）。
+    ③引擎最新信号非 DROP/STOP/REDUCE 且风险项无"板块…弱势"（匹配自家引擎的固定文案）；
+      ETF 不进 8 维引擎，排雷不适用 → 条件③视为满足。
     ready = 三条件全为 True 且冷静期已满；未知(None)按未满足处理——宁可晚接，不抢跑。
     冷静期按自然工作日近似交易日（与 load_kline 的陈旧判定同一口径）。
     """
@@ -217,14 +261,16 @@ def reentry_watch(cfg: dict | None = None, today: pd.Timestamp | None = None,
         elapsed = max(0, len(pd.bdate_range(pd.Timestamp(it["exit_date"]), today)) - 1)
         last = float(kline["close"].astype(float).iloc[-1])
         trail = trail_line(kline, cfg["atr_k"])
-        light = light_by_symbol.get("sh000688" if sym.startswith("688") else "sh000852")
+        light = light_by_symbol.get(
+            "sh000688" if sym.startswith(("688", "588")) else "sh000852")
         sig = signals.get(sym, {})
         decision = sig.get("decision", "")
         sector_weak = any("板块" in r and "弱势" in r for r in sig.get("risks", []))
         conds = {
             "light_ok": None if light is None else light["state"] == "risk_on",
             "trend_ok": last >= trail,
-            "engine_ok": (None if not decision
+            "engine_ok": (True if is_etf(sym)  # ETF 无引擎排雷，条件不适用=满足
+                          else None if not decision
                           else decision not in NEG_DECISIONS and not sector_weak),
         }
         rows.append({
@@ -260,6 +306,7 @@ def holdings_health(cfg: dict | None = None, today: pd.Timestamp | None = None) 
         rows.append({
             "symbol": sym, "name": it.get("name", sym),
             "position": float(it["position"]),
+            "etf": is_etf(sym),
             "close": last, "close_date": str(kline["date"].iloc[-1].date()),
             "stale": stale,
             "entry": entry, "pnl_pct": last / entry - 1,
@@ -269,3 +316,37 @@ def holdings_health(cfg: dict | None = None, today: pd.Timestamp | None = None) 
             "risks": sig.get("risks", []),
         })
     return {"rows": rows, "signal_date": sig_date, "any_stale": any_stale}
+
+
+def etf_watch(cfg: dict | None = None, today: pd.Timestamp | None = None) -> dict:
+    """晨报【ETF观察】数据：watchlist 里 WATCHING 状态 ETF 的趋势读数。
+
+    纯展示、不给买卖信号——抄底灯的参数与期望值只在个股中性池上回测过，
+    对 ETF 不适用（"无回测不改参"，扩展需先过 stock_lights 级别的回测）。
+    读数与既有口径对齐：dd120=距 120 日最高收盘（抄底灯 setup 同源）、
+    vs_ma200=主灯/结构灯的趋势腿、trail=持仓止损共用的 ATR 追踪线。
+    """
+    cfg = cfg or load_portfolio_config()
+    today = today or pd.Timestamp.today().normalize()
+    rows, any_stale = [], False
+    for it in cfg.get("etf_watching", []):
+        sym = str(it["symbol"]).zfill(6)
+        base = {"symbol": sym, "name": it.get("name", sym)}
+        kline, stale = load_kline(sym, today)
+        if kline.empty or len(kline) < ATR_N + 1:
+            rows.append({**base, "error": "无K线数据"})
+            continue
+        any_stale |= stale
+        close = kline["close"].astype(float)
+        last = float(close.iloc[-1])
+        ma200 = float(close.tail(200).mean()) if len(close) >= 200 else None
+        trail = trail_line(kline, cfg.get("atr_k", 2.0))
+        rows.append({
+            **base, "stale": stale,
+            "close": last, "close_date": str(kline["date"].iloc[-1].date()),
+            "chg_1d": last / float(close.iloc[-2]) - 1 if len(close) >= 2 else 0.0,
+            "dd120": last / float(close.tail(DD_WINDOW).max()) - 1,
+            "vs_ma200": last / ma200 - 1 if ma200 else None,
+            "trail": trail, "above_trail": last >= trail,
+        })
+    return {"rows": rows, "any_stale": any_stale}

@@ -36,17 +36,25 @@ from engine.state_machine import load_positions, effective_state
 
 
 def load_watchlist(path: Path) -> list[dict]:
+    from factors._kline import is_etf
+
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     items = cfg.get("watchlist", [])
     seen = set()
     out = []
+    skipped_etf = 0
     for it in items:
         sym = str(it["symbol"]).zfill(6)
         if sym in seen:
             continue
         seen.add(sym)
+        if is_etf(sym):  # 8 维打分不适用于 ETF（无基本面/筹码口径），晨报走【ETF观察】
+            skipped_etf += 1
+            continue
         out.append({"symbol": sym, "name": it.get("name", ""), "state": it.get("state", "WATCHING")})
+    if skipped_etf:
+        print(f"[watchlist] 跳过 {skipped_etf} 只 ETF（引擎 8 维不适用，由晨报 ETF观察段接管）")
     return out
 
 

@@ -119,6 +119,24 @@ def test_lamp_rows_uses_kline_and_flags_fire(monkeypatch, tmp_path):
     assert by_sym["002074"]["dd120"] < -0.35
 
 
+def test_lamp_rows_skips_etf(monkeypatch, tmp_path):
+    """ETF 不打灯（参数只在个股上回测过）——即使 K 线是深跌形态也不进灯列表。"""
+    wl = tmp_path / "watchlist.yaml"
+    wl.write_text(
+        "watchlist:\n"
+        "  - { symbol: \"515050\", name: \"5G通信ETF\", state: \"WATCHING\" }\n"
+        "  - { symbol: \"002074\", name: \"国轩高科\", state: \"WATCHING\" }\n",
+        encoding="utf-8")
+    monkeypatch.setattr(sl, "REPO", tmp_path)
+    crash = _mk(_crash_path()).reset_index(names="date")
+    from quant.live import portfolio
+    monkeypatch.setattr(portfolio, "load_kline", lambda sym, today: (crash, False))
+
+    out = sl.lamp_rows(today=pd.Timestamp("2024-08-01"))
+    syms = [r["symbol"] for r in out["rows"]]
+    assert "515050" not in syms and syms == ["002074"]
+
+
 def test_event_rows_survives_kline_shorter_than_horizon():
     """K线短于最长 horizon(60) 时主切片负索引会回绕——须有防护不崩。"""
     ind = sl.compute_indicators(_mk([100.0] * 50))

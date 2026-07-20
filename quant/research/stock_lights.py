@@ -498,6 +498,7 @@ def lamp_rows(today: pd.Timestamp | None = None) -> dict:
 
     K 线走 quant.live.portfolio.load_kline（旧引擎缓存 + 陈旧时 akshare 降级），
     与持仓健康度同源同口径。lamp: fire=左侧触发 / watch=底部区观察 / none=未到 setup。
+    ETF 不打灯：参数与期望值只在个股中性池上回测过（晨报另有【ETF观察】段）。
     """
     import yaml
 
@@ -506,6 +507,7 @@ def lamp_rows(today: pd.Timestamp | None = None) -> dict:
     today = today or pd.Timestamp.today().normalize()
     with open(REPO / "watchlist.yaml", encoding="utf-8") as f:
         items = (yaml.safe_load(f) or {}).get("watchlist", [])
+    items = [it for it in items if not portfolio.is_etf(str(it["symbol"]))]
     rows, any_stale = [], False
     for it in items:
         sym = str(it["symbol"]).zfill(6)
@@ -538,6 +540,8 @@ def status(thr: float = PRIMARY_THR) -> None:
     """用 cache/kline 新鲜数据给 watchlist 每只票打当前灯态（不依赖 qlib bin 更新）。"""
     import yaml
 
+    from quant.live import portfolio
+
     with open(REPO / "watchlist.yaml", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     greens = regime_greens()
@@ -548,6 +552,8 @@ def status(thr: float = PRIMARY_THR) -> None:
     rows = []
     for it in cfg.get("watchlist", []):
         sym = str(it["symbol"]).zfill(6)
+        if portfolio.is_etf(sym):  # ETF 不打灯（未回测），晨报走【ETF观察】
+            continue
         p = KLINE_DIR / f"{sym}_daily_qfq.csv"
         if not p.exists():
             rows.append({"代码": sym, "名称": it.get("name", ""), "状态": it.get("state", ""),

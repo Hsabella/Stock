@@ -25,8 +25,26 @@ def _is_fresh(p: Path, ttl_hours: int = CACHE_TTL_HOURS) -> bool:
     return (time.time() - p.stat().st_mtime) / 3600 < ttl_hours
 
 
+ETF_PREFIXES = ("51", "56", "58", "159")  # 沪 51x/56x/58x + 深 159x
+
+
+def is_etf(symbol: str) -> bool:
+    """场内 ETF 代码段判定（quant/live/portfolio.py 有同款副本，venv 隔离不互相 import）。"""
+    return str(symbol).startswith(ETF_PREFIXES)
+
+
 def _sina_symbol(symbol: str) -> str:
     return f"sh{symbol}" if symbol.startswith("6") else f"sz{symbol}"
+
+
+def _fetch_etf(symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
+    """东财 ETF 日线（复权）→ 与股票缓存同列名。新浪股票接口对基金代码直接报错，
+    新浪 fund_etf_hist_sina 不复权（份额拆分会污染距高/MA 计算），都不能用。"""
+    df = ak.fund_etf_hist_em(symbol=symbol, period="daily",
+                             start_date=start, end_date=end, adjust=adjust)
+    return df.rename(columns={"日期": "date", "开盘": "open", "收盘": "close",
+                              "最高": "high", "最低": "low", "成交量": "volume",
+                              "成交额": "amount", "换手率": "turnover"})
 
 
 def get_kline(symbol: str, days: int = 250, adjust: str = "qfq",
@@ -52,11 +70,14 @@ def get_kline(symbol: str, days: int = 250, adjust: str = "qfq",
     s = start.strftime("%Y%m%d")
     e = end.strftime("%Y%m%d")
     try:
-        df = ak.stock_zh_a_daily(
-            symbol=_sina_symbol(symbol), start_date=s, end_date=e, adjust=adjust
-        )
+        if is_etf(symbol):
+            df = _fetch_etf(symbol, s, e, adjust)
+        else:
+            df = ak.stock_zh_a_daily(
+                symbol=_sina_symbol(symbol), start_date=s, end_date=e, adjust=adjust
+            )
     except Exception as ex:
-        print(f"  [kline sina] {symbol} error: {ex}")
+        print(f"  [kline] {symbol} error: {ex}")
         return pd.DataFrame()
 
     if df is None or df.empty:
@@ -67,7 +88,7 @@ def get_kline(symbol: str, days: int = 250, adjust: str = "qfq",
     for c in ("open", "high", "low", "close", "volume", "amount", "outstanding_share", "turnover"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-    if "turnover" in df.columns:
-        df["turnover"] = df["turnover"] * 100.0  # 0.0038 → 0.38 (%)
+    if "turnover" in df.columns and not is_etf(symbol):
+        df["turnover"] = df["turnover"] * 100.0  # 新浪是小数: 0.0038 → 0.38 (%)；东财已是 %
     df.to_csv(p, index=False)
     return df.tail(days).reset_index(drop=True)
