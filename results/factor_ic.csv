@@ -42,6 +42,7 @@ date,factor,ic,n
 20260710,fundamental_rank,0.369218,47
 20260713,fundamental_rank,0.184436,47
 20260714,fundamental_rank,0.267692,47
+20260715,fundamental_rank,-0.004741,47
 20260510,fund_flow_rank,-0.260312,50
 20260511,fund_flow_rank,-0.048355,50
 20260512,fund_flow_rank,0.197887,50
@@ -84,6 +85,7 @@ date,factor,ic,n
 20260710,fund_flow_rank,0.07102,50
 20260713,fund_flow_rank,0.049796,50
 20260714,fund_flow_rank,0.089556,50
+20260715,fund_flow_rank,-0.06545,50
 20260510,liquidity_rank,-0.176566,50
 20260511,liquidity_rank,-0.125708,50
 20260512,liquidity_rank,-0.076225,50
@@ -112,6 +114,7 @@ date,factor,ic,n
 20260709,liquidity_rank,0.051086,50
 20260710,liquidity_rank,-0.226319,50
 20260714,liquidity_rank,0.013195,50
+20260715,liquidity_rank,0.219247,50
 20260510,tech_rank,-0.164191,50
 20260511,tech_rank,0.156581,50
 20260512,tech_rank,-0.013989,50
@@ -151,6 +154,7 @@ date,factor,ic,n
 20260710,tech_rank,-0.124517,50
 20260713,tech_rank,0.148075,50
 20260714,tech_rank,-0.028111,50
+20260715,tech_rank,0.359855,50
 20260510,chips_rank,0.014265,50
 20260511,chips_rank,-0.047983,50
 20260512,chips_rank,0.059462,50
@@ -190,6 +194,7 @@ date,factor,ic,n
 20260710,chips_rank,-0.021283,50
 20260713,chips_rank,-0.157344,50
 20260714,chips_rank,-0.389191,50
+20260715,chips_rank,0.135639,50
 20260510,regime_rank,0.098199,50
 20260511,regime_rank,0.132197,50
 20260512,regime_rank,0.077359,50
@@ -229,6 +234,7 @@ date,factor,ic,n
 20260710,regime_rank,-0.072077,50
 20260713,regime_rank,-0.030437,50
 20260714,regime_rank,-0.507611,50
+20260715,regime_rank,-0.278655,50
 20260511,sector_rank,-0.105982,50
 20260512,sector_rank,-0.094975,50
 20260513,sector_rank,-0.084641,50
@@ -268,6 +274,7 @@ date,factor,ic,n
 20260710,sector_rank,-0.118609,50
 20260713,sector_rank,-0.309914,50
 20260714,sector_rank,-0.003212,50
+20260715,sector_rank,0.165805,50
 20260511,news_rank,0.251189,50
 20260512,news_rank,-0.148917,50
 20260513,news_rank,0.070062,50
@@ -310,6 +317,7 @@ date,factor,ic,n
 20260710,news_rank,0.112018,50
 20260713,news_rank,0.022764,50
 20260714,news_rank,-0.221736,50
+20260715,news_rank,-0.122364,50
 20260510,composite,-0.16525,50
 20260511,composite,-0.188109,50
 20260512,composite,0.041925,50
@@ -353,3 +361,4 @@ date,factor,ic,n
 20260710,composite,0.069683,50
 20260713,composite,0.042693,50
 20260714,composite,-0.262738,50
+20260715,composite,-0.310186,50
