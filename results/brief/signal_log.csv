@@ -5,3 +5,4 @@ date,state,raw_today,exposure,hs300_close
 2026-07-16,risk_on,0,1.00,4786.8
 2026-07-17,risk_on,0,1.00,4698.4
 2026-07-20,risk_on,1,1.00,4529.1
+2026-07-21,risk_off,1,0.70,4598.3
