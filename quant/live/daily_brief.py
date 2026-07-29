@@ -183,9 +183,15 @@ def _format_holdings(b: dict) -> list[str]:
             continue
         stop = (f"止损线 {r['stop_line']:.2f} 已破❗"
                 if r["broken"] else f"止损线 {r['stop_line']:.2f}（距离 {r['dist_pct']:+.1%}）")
+        if r.get("degraded"):
+            stop += f" ⚠️({r['degrade_reason']}, 仅硬止损)"
+        trend = (f"ATR趋势线 {r['trend_line']:.2f} "
+                 f"{'上方🟢' if r['above_trend'] else '下方🔴'}")
         tag = "[ETF] " if r.get("etf") else ""
         seg = (f"  {r['name']} {r['symbol']} {tag}{r['close']:.2f}/{r['entry']:.2f} "
-               f"{r['pnl_pct']:+.1%} | {stop}")
+               f"{r['pnl_pct']:+.1%} | {stop} | {trend}")
+        if r.get("arm_suspect"):
+            seg += f" ⚠️左臂标注存疑(入场时距120日高 {r['dd_at_entry']:+.0%})"
         if r["decision"] in ("REDUCE", "DROP", "STOP", "TAKE"):
             seg += f" | 引擎:{r['decision']}"
         if r["risks"]:
