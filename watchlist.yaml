@@ -2,15 +2,16 @@
 # state: NONE / WATCHING / HELD / EXITED
 # 实盘配置 — 2026-05-10
 cooldown_days: 10
-default_stop_strategy: "atr_2"   # 晨报持仓健康度段读取: ATR 追踪线 = 近20日最高收盘 - 2×ATR14
+default_stop_strategy: "atr_2"   # 棘轮 k=2: 止损 = max(初始止损, 入场以来最高收盘-2×ATR14 的历史最大, 只升不降)
+                                 #   ATR趋势线(回补观察/ETF观察的趋势读数)仍为 近20日最高收盘-2×ATR14, 与止损锚点已分离
 default_max_position_pct: 0.10
 
 # ===== 账户与目标结构（晨报持仓健康度/结构修正跟踪 读取）=====
 account:
-  cash: 164456.52            # ⚠️估算（2026-07-21 雪人清仓 +12984 / 科创50ETF建仓 -5505；
-  as_of: "2026-07-21"
+  cash: 125641.82            # 2026-07-28 盘中截图"可用资金"口径(总资产 190,635.32 − 证券 64,992.50)
+  as_of: "2026-07-28"
   etf:                       # 核心宽基 ETF 持仓（引擎不扫，仅结构跟踪）: {symbol,name,position,entry_price}
-    - { symbol: "159919", name: "沪深300ETF", position: 4300, entry_price: 4.861 }
+    - { symbol: "159919", name: "沪深300ETF", position: 9400, entry_price: 4.884 }  # 2026-07-28 加仓 3000 股, 成本 4.900→4.884
 target_structure:
   core_etf_pct: [0.40, 0.50] # 核心宽基 ETF 目标占比区间
   satellite_max_count: 3     # 卫星个股最多只数
@@ -18,13 +19,18 @@ target_structure:
 hard_stop_pct: 0.08          # 硬止损 = 成本 × (1 - 8%)
 
 watchlist:
-  # ===== 持仓 HELD =====（2026-07-21 雪人清仓后卫星个股清空，账户只剩核心宽基 ETF；
-  #   卫星额度 0/3 只，抄底灯亮时可开新仓）
+  # ===== 持仓 HELD =====（2026-07-28 盘中加仓: 主题ETF 588000 接回 + 515050 新开,
+  #   卫星额度 2/3 只（个股 0）；核心宽基 159919 加仓见顶层 account.etf）
+  # HELD 记法: 必填 position/entry_price；2026-07-28 起新增 entry_date(首次建仓日, 加仓不改)
+  #   与 entry_arm(left=抄底灯左侧建仓→初始止损 entry-3×ATR14; right=回补接回等右侧入场
+  #   →初始止损 entry×0.92, 缺省 right)。缺 entry_date 的仓位止损降级为仅硬止损并标 ⚠️。
+  #   例: { symbol: "002506", name: "协鑫集成", state: "HELD", position: 20000,
+  #         entry_price: 2.49, entry_date: "2026-07-28", entry_arm: "left" }
   # ===== 止损清仓 =====（exit_price=成交/委托价，与成交均价或有微差，可事后修正）
+  - { symbol: "601208", name: "东材科技",   state: "EXITED", exit_date: "2026-07-27", exit_price: 41.88 }  # 成本 41.465 清仓 +1.0%（2026-07-23 接回，持 2 交易日）
   - { symbol: "002639", name: "雪人集团",   state: "EXITED", exit_date: "2026-07-21", exit_price: 10.83 }
   - { symbol: "002842", name: "翔鹭钨业",   state: "EXITED", exit_date: "2026-07-20", exit_price: 31.88 }
   - { symbol: "601698", name: "中国卫通",   state: "EXITED", exit_date: "2026-07-20", exit_price: 25.95 }
-  - { symbol: "601208", name: "东材科技",   state: "EXITED", exit_date: "2026-07-20", exit_price: 43.29 }
   - { symbol: "002716", name: "湖南白银",   state: "EXITED", exit_date: "2026-07-20", exit_price: 7.02 }
   # EXITED 记法: 止损卖出后把 state 改 EXITED 并加 exit_date/exit_price（别删条目）,
   #   晨报【回补观察】自动跟踪接回三条件（结构灯/趋势线/引擎信号）+ 10 交易日冷静期;
@@ -37,8 +43,10 @@ watchlist:
   #   行业/主题 ETF 记这里——WATCHING 进晨报【ETF观察】（趋势读数，无买卖信号），
   #   HELD 进持仓健康度（止损线照算），且计入卫星仓 ≤3只×≤10% 限额；
   #   8 维引擎与个股抄底灯对 ETF 自动跳过（无基本面口径 / 灯未回测）。
-  - { symbol: "588000", name: "科创50ETF", state: "HELD", position: 3000, entry_price: 1.835 } 
-  - { symbol: "515050", name: "5G通信ETF", state: "WATCHING" }
+  - { symbol: "588000", name: "科创50ETF", state: "HELD", position: 8300,
+      entry_price: 1.799, entry_date: "2026-07-28", entry_arm: "right" }  # 07-28 接回2800@1.805后盘中加至8300, 摊薄1.799(冷静期4/10未满); 前轮 1.835 → 07-22 止盈 1.968 +7.2%
+  - { symbol: "515050", name: "5G通信ETF", state: "HELD", position: 5000,
+      entry_price: 0.969, entry_date: "2026-07-28", entry_arm: "right" }  # 07-28 新开
   # 旧记录（注释时引擎还不支持 ETF；2026-07-16 券商同步时账户已无此持仓，留作历史）
   # - { symbol: "512880", name: "证券ETF",   state: "HELD", position: 11400, entry_price: 1.130, notes: "ETF, engine skip" }
 
@@ -57,7 +65,7 @@ watchlist:
   # 新能源 / 锂电
   - { symbol: "002466", name: "天齐锂业",   state: "WATCHING" }
   - { symbol: "002506", name: "协鑫集成",   state: "WATCHING" }
-  - { symbol: "002015", name: "协鑫能科",   state: "WATCHING" }
+  - { symbol: "002015", name: "协鑫能科",   state: "EXITED", exit_date: "2026-07-23", exit_price: 15.7 }  # 成本 15.35 清仓 +2.3%
   - { symbol: "300724", name: "捷佳伟创",   state: "WATCHING" }
   - { symbol: "600673", name: "东阳光",     state: "WATCHING" }
 
@@ -88,7 +96,7 @@ watchlist:
 
   # 数据 / IDC
   - { symbol: "300738", name: "奥飞数据",   state: "WATCHING" }
-  - { symbol: "002518", name: "科士达",     state: "WATCHING" }
+  - { symbol: "002518", name: "科士达",     state: "EXITED", exit_date: "2026-07-27", exit_price: 32.85 }  # 成本 33.397 清仓 -1.6%
 
   # 半导体（追加）
   - { symbol: "688981", name: "中芯国际",   state: "WATCHING" }
@@ -109,6 +117,6 @@ watchlist:
   # 机器人 / 自动化（人形机器人 + 工业机器人龙头）
   - { symbol: "300124", name: "汇川技术",   state: "WATCHING" }   # 伺服系统/机器人核心
   - { symbol: "002472", name: "双环传动",   state: "WATCHING" }   # 谐波减速器/精密齿轮
-  - { symbol: "002009", name: "埃斯顿",     state: "WATCHING" }   # 国产工业机器人本体
+  - { symbol: "002747", name: "埃斯顿",     state: "WATCHING" }   # 国产工业机器人本体（002009 是天奇股份，2026-07-21 修正）
   - { symbol: "300024", name: "机器人",     state: "WATCHING" }   # 沈阳新松
   - { symbol: "300607", name: "拓斯达",     state: "WATCHING" }   # 自动化设备/工业机器人

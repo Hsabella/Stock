@@ -25,7 +25,9 @@ DEC_DIR = REPO / "results" / "decisions"
 STALE_TRADING_DAYS = 3
 ETF_STALE_TRADING_DAYS = 1  # ETF 缓存无旧引擎夜刷，晨报必须拿到上一交易日收盘
 ATR_N = 14
-TRAIL_WINDOW = 20  # ATR 追踪线的滚动最高收盘窗口
+TRAIL_WINDOW = 20  # ATR 追踪线的滚动最高收盘窗口（趋势读数用；止损锚点是 since-entry，见 stop_lines）
+LEFT_INIT_ATR_K = 3.0  # 左侧臂初始止损 = 入场价 - 3×ATR14(信号日)；与 stock_lights.py LEFT_STOP_ATR 同源定案
+ARM_SUSPECT_DD = -0.25  # 左臂标注体检：入场时距 120 日高应 ≤ -25%（抄底灯 setup 最浅档），不满足疑似标错臂
 ETF_PREFIXES = ("51", "56", "58", "159")  # 沪 51x/56x/58x + 深 159x；LOF/封基不算
 DD_WINDOW = 120  # ETF 观察的"距 N 日最高收盘"窗口（与抄底灯 setup 同口径，便于对照）
 
@@ -131,24 +133,90 @@ def load_kline(symbol: str, today: pd.Timestamp) -> tuple[pd.DataFrame, bool]:
 
 
 def trail_line(kline: pd.DataFrame, atr_k: float) -> float:
-    """ATR 追踪线 = 近20日最高收盘 - k×ATR14（止损与回补观察共用同一条趋势线）。"""
+    """ATR 趋势线 = 近20日最高收盘 - k×ATR14（回补观察/ETF观察的趋势读数，非止损锚）。"""
     close = kline["close"].astype(float)
     atr = _atr(kline["high"].astype(float), kline["low"].astype(float), close)
     return float(close.tail(TRAIL_WINDOW).max() - atr_k * atr.iloc[-1])
 
 
-def stop_lines(kline: pd.DataFrame, entry_price: float, hard_stop_pct: float,
-               atr_k: float) -> dict:
-    """两条止损线：硬止损（成本-N%）+ ATR 追踪线（近20日最高收盘 - k×ATR14）。"""
+def since_entry_ratchet(kline: pd.DataFrame, entry_date, atr_k: float) -> float | None:
+    """入场以来棘轮止损 = max_u( 入场至 u 日最高收盘 - k×ATR14(u) )，u 遍历入场后每个交易日。
+
+    与 stock_lights.py 回测持仓循环同构（stop = max(stop, hi - k×atr)），从当前 K 线
+    整段确定性重算、不持久化——qfq 前复权在每个除权日整体重排历史价，存盘的 stop
+    价位会跨复权基准失效，重算天然免疫。
+    K 线起点晚于入场日（缺入场早期高点）、入场后尚无收盘 bar、或窗口内 ATR 有缺
+    → 返回 None 由调用方降级，不静默用残缺窗口。
+    """
+    dates = pd.to_datetime(kline["date"])
+    entry = pd.Timestamp(entry_date)
+    if dates.iloc[0] > entry:
+        return None
+    mask = (dates >= entry).to_numpy()
+    if not mask.any():
+        return None
     close = kline["close"].astype(float)
-    hard = entry_price * (1 - hard_stop_pct)
-    trail = trail_line(kline, atr_k)
-    line = max(hard, trail)  # 两线取严者判"已破"
+    atr = _atr(kline["high"].astype(float), kline["low"].astype(float), close)
+    lines = close[mask].cummax() - atr_k * atr[mask]
+    if lines.isna().any():
+        return None
+    return float(lines.max())
+
+
+def _signal_day_atr(kline: pd.DataFrame, entry_date) -> float | None:
+    """入场前一交易日（信号日）的 ATR14——回测左侧臂用 atr[t] 而非入场当日，对齐。"""
+    dates = pd.to_datetime(kline["date"])
+    close = kline["close"].astype(float)
+    atr = _atr(kline["high"].astype(float), kline["low"].astype(float), close)
+    before = atr[(dates < pd.Timestamp(entry_date)).to_numpy()]
+    if before.empty or pd.isna(before.iloc[-1]):
+        return None
+    return float(before.iloc[-1])
+
+
+def stop_lines(kline: pd.DataFrame, entry_price: float, hard_stop_pct: float,
+               atr_k: float, entry_date=None, entry_arm: str = "right") -> dict:
+    """止损合成（与 stock_lights.py 回测同构）+ 展示用 ATR 趋势线。
+
+    初始止损按入场臂选：right = entry×(1-8%)（回测 RIGHT_STOP 0.92）；
+    left = entry - 3×ATR14(信号日)（回测 LEFT_STOP_ATR，宽止损防打脸）。
+    最终 stop = max(初始止损, since-entry 棘轮)，只升不降。
+    entry_date 缺失 / K 线覆盖不足 / ATR 不可算 → 降级为仅初始硬止损并标 degraded。
+    """
+    close = kline["close"].astype(float)
     last = float(close.iloc[-1])
+    hard = entry_price * (1 - hard_stop_pct)
+    arm = str(entry_arm or "right").lower()
+    init, degraded, reason = hard, False, ""
+    if entry_date is None:
+        degraded, reason = True, "缺entry_date"
+    if arm == "left" and not degraded:
+        atr_sig = _signal_day_atr(kline, entry_date)
+        if atr_sig is None:
+            degraded, reason = True, "入场前ATR不可算"
+        else:
+            init = entry_price - LEFT_INIT_ATR_K * atr_sig
+    ratchet = None
+    if not degraded:
+        ratchet = since_entry_ratchet(kline, entry_date, atr_k)
+        if ratchet is None:
+            degraded, reason = True, "K线不足入场窗"
+            init = hard  # 左臂算出的 init 也不可信（窗口残缺），一并退回硬止损
+    suspect, dd_at_entry = None, None
+    if arm == "left" and entry_date is not None:
+        upto = close[(pd.to_datetime(kline["date"]) < pd.Timestamp(entry_date)).to_numpy()]
+        if len(upto) >= 60:  # 不足半个 setup 窗不下判断
+            dd_at_entry = float(upto.iloc[-1] / upto.tail(DD_WINDOW).max() - 1)
+            suspect = dd_at_entry > ARM_SUSPECT_DD
+    line = init if ratchet is None else max(init, ratchet)
+    trend = trail_line(kline, atr_k)
     return {
-        "hard_stop": hard, "atr_stop": trail, "stop_line": line,
-        "broken": last < line,
+        "hard_stop": hard, "init_stop": init, "ratchet": ratchet,
+        "stop_line": line, "broken": last < line,
         "dist_pct": last / line - 1,  # 现价距止损线（负=已破）
+        "trend_line": trend, "above_trend": last >= trend,
+        "degraded": degraded, "degrade_reason": reason,
+        "arm_suspect": suspect, "dd_at_entry": dd_at_entry,
     }
 
 
@@ -311,7 +379,9 @@ def holdings_health(cfg: dict | None = None, today: pd.Timestamp | None = None) 
             "stale": stale,
             "entry": entry, "pnl_pct": last / entry - 1,
             "value": last * float(it["position"]),
-            **stop_lines(kline, entry, cfg["hard_stop_pct"], cfg["atr_k"]),
+            **stop_lines(kline, entry, cfg["hard_stop_pct"], cfg["atr_k"],
+                         entry_date=it.get("entry_date"),
+                         entry_arm=it.get("entry_arm", "right")),
             "decision": sig.get("decision", ""),
             "risks": sig.get("risks", []),
         })

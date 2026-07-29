@@ -23,29 +23,101 @@ def _kline(n=40, close_start=100.0, step=-1.0, spread=2.0):
     })
 
 
-def test_stop_lines_hand_calculated():
-    """恒定 TR=spread 时 ATR14=spread；追踪线=20日最高收盘-k×spread。"""
+def _vkline(closes, spread=2.0, start="2026-05-01"):
+    """按给定收盘序列合成日K；恒定 spread 且相邻涨跌 ≤ spread/2 时 TR=spread → ATR14=spread。"""
+    dates = pd.bdate_range(start, periods=len(closes))
+    close = pd.Series(closes, dtype=float)
+    return pd.DataFrame({"date": dates, "close": close,
+                         "high": close + spread / 2, "low": close - spread / 2,
+                         "open": close})
+
+
+def test_stop_lines_bottom_entry_not_broken_on_day_one():
+    """坑底新仓（东材场景形状）：锚点在入场前的旧口径首日即判已破，since-entry 锚不破。"""
+    k = _kline(n=40, close_start=100.0, step=-1.0, spread=2.0)  # ATR14=2, 一路阴跌
+    entry_date = k["date"].iloc[-1]  # 昨日建仓, 今晨首次读数
+    out = stop_lines(k, entry_price=61.0, hard_stop_pct=0.08, atr_k=2.0,
+                     entry_date=entry_date, entry_arm="right")
+    assert abs(out["hard_stop"] - 61.0 * 0.92) < 1e-9
+    assert abs(out["ratchet"] - (61.0 - 2.0 * 2.0)) < 1e-9   # 入场以来最高收盘=入场日 61
+    assert abs(out["stop_line"] - 57.0) < 1e-9               # max(56.12, 57.0)
+    assert not out["broken"] and out["dist_pct"] > 0
+    assert not out["degraded"]
+    # 旧锚（近20日高 80 − 4 = 76）在入场前高点上，若沿用必误判已破——现仅作趋势读数
+    assert abs(out["trend_line"] - 76.0) < 1e-9
+    assert not out["above_trend"]
+
+
+def test_stop_lines_ratchet_locks_profit():
+    """先涨后跌（588000 场景形状）：棘轮把 stop 抬到入场价上方，回撤破线锁利。"""
+    closes = [100.0] * 20 + [100 + 2 * i for i in range(1, 16)] + \
+             [130 - 2 * i for i in range(1, 8)]                # 涨到 130 再回撤到 116
+    k = _vkline(closes, spread=6.0)                            # ATR14=6 恒定
+    entry_date = k["date"].iloc[20]                            # 起涨首日建仓 @102
+    out = stop_lines(k, entry_price=102.0, hard_stop_pct=0.08, atr_k=2.0,
+                     entry_date=entry_date, entry_arm="right")
+    assert abs(out["ratchet"] - (130.0 - 12.0)) < 1e-9         # 峰值日线 118 被棘轮保持
+    assert abs(out["stop_line"] - 118.0) < 1e-9
+    assert out["broken"]                                       # 116 < 118 → 锁利离场
+    assert out["stop_line"] > 102.0                            # 破线价仍高于成本 = 锁利
+
+
+def test_stop_lines_ratchet_monotonic_as_days_pass():
+    """逐日截断重算：stop 序列必须单调不降（ATR 变大使当日线下移时棘轮不得跟随）。"""
+    closes = [100.0] * 20 + [100 + i for i in range(1, 11)] + [110.0] * 5
+    k = _vkline(closes, spread=2.0)
+    k.loc[k.index[-5:], "high"] = 110.0 + 4.0                  # 末 5 日振幅放大: ATR 抬升
+    k.loc[k.index[-5:], "low"] = 110.0 - 4.0
+    entry_date = k["date"].iloc[20]
+    stops = [stop_lines(k.iloc[:m], 101.0, 0.08, 2.0,
+                        entry_date=entry_date, entry_arm="right")["stop_line"]
+             for m in range(22, len(k) + 1)]
+    assert all(b >= a - 1e-9 for a, b in zip(stops, stops[1:]))
+    # 末日当日线 = 110 - 2×ATR(变大) 低于此前峰值线, 棘轮应保持峰值不回落
+    assert abs(stops[-1] - max(stops)) < 1e-9
+
+
+def test_stop_lines_left_arm_wide_init():
+    """左臂初始止损 = entry − 3×ATR14(信号日)，比 8% 硬止损宽（抄底仓防打脸）。"""
     k = _kline(n=40, close_start=100.0, step=-1.0, spread=2.0)
-    # 手算: TR = max(high-low, |high-pc|, |low-pc|) = max(2, |−1+1|+... ) = 2? 逐日:
-    # high-low=2; high-pc = (c+1)-(c_prev)= c_prev-1+1-c_prev = 0? 实际 close 递减 1:
-    # high_t = c_t+1, pc = c_t+1 → high-pc = 0; low-pc = c_t-1-(c_t+1) = -2 → abs=2 → TR=2
-    atr = _atr(k["high"], k["low"], k["close"], n=14)
-    assert abs(atr.iloc[-1] - 2.0) < 1e-9
-    out = stop_lines(k, entry_price=90.0, hard_stop_pct=0.08, atr_k=2.0)
-    # 近20日最高收盘 = 40根中最后20根的最高 = close[20] = 100-20 = 80
-    assert abs(out["atr_stop"] - (80.0 - 2.0 * 2.0)) < 1e-9
-    assert abs(out["hard_stop"] - 90.0 * 0.92) < 1e-9
-    # stop_line 取两者较严（较高）者 = 82.8; 现价 61 < 82.8 → 已破
-    assert abs(out["stop_line"] - 82.8) < 1e-9
-    assert out["broken"]
-    assert out["dist_pct"] < 0
-
-
-def test_stop_lines_not_broken_when_price_above():
-    k = _kline(n=40, close_start=100.0, step=+0.5, spread=1.0)  # 上涨趋势
-    out = stop_lines(k, entry_price=100.0, hard_stop_pct=0.08, atr_k=2.0)
+    entry_date = k["date"].iloc[-1]
+    out = stop_lines(k, entry_price=61.0, hard_stop_pct=0.08, atr_k=2.0,
+                     entry_date=entry_date, entry_arm="left")
+    assert abs(out["init_stop"] - (61.0 - 3.0 * 2.0)) < 1e-9   # 55.0
+    assert out["init_stop"] < out["hard_stop"]                 # 宽于 56.12
+    assert abs(out["stop_line"] - 57.0) < 1e-9                 # 棘轮 57 仍是最严约束
     assert not out["broken"]
-    assert out["dist_pct"] > 0
+
+
+def test_stop_lines_degraded_paths():
+    """缺 entry_date / K线不足入场窗 / 入场前ATR不可算 → 退回硬止损并标 degraded。"""
+    k = _kline(n=40, close_start=100.0, step=-1.0, spread=2.0)
+    out = stop_lines(k, 90.0, 0.08, 2.0)                       # 无 entry_date
+    assert out["degraded"] and out["degrade_reason"] == "缺entry_date"
+    assert out["ratchet"] is None
+    assert abs(out["stop_line"] - 90.0 * 0.92) < 1e-9
+    out = stop_lines(k, 90.0, 0.08, 2.0, entry_date="2026-01-02")  # K线起点晚于入场日
+    assert out["degraded"] and out["degrade_reason"] == "K线不足入场窗"
+    assert abs(out["stop_line"] - out["hard_stop"]) < 1e-9
+    out = stop_lines(k, 90.0, 0.08, 2.0,                       # 入场前仅 5 根, ATR14=NaN
+                     entry_date=k["date"].iloc[5], entry_arm="left")
+    assert out["degraded"] and out["degrade_reason"] == "入场前ATR不可算"
+    assert abs(out["stop_line"] - out["hard_stop"]) < 1e-9
+
+
+def test_stop_lines_left_arm_suspect_flag():
+    """entry_arm=left 但入场时距120日高不足 -25% → 标注存疑（人工标错臂的廉价体检）。"""
+    up = _kline(n=80, close_start=100.0, step=+0.5, spread=1.0)   # 高位入场, 非坑底
+    out = stop_lines(up, float(up["close"].iloc[-1]), 0.08, 2.0,
+                     entry_date=up["date"].iloc[-1], entry_arm="left")
+    assert out["arm_suspect"] is True and out["dd_at_entry"] > -0.25
+    down = _kline(n=80, close_start=100.0, step=-1.0, spread=2.0)  # 真坑底
+    out = stop_lines(down, 22.0, 0.08, 2.0,
+                     entry_date=down["date"].iloc[-1], entry_arm="left")
+    assert out["arm_suspect"] is False and out["dd_at_entry"] < -0.25
+    out = stop_lines(down, 22.0, 0.08, 2.0,
+                     entry_date=down["date"].iloc[-1], entry_arm="right")
+    assert out["arm_suspect"] is None                          # 右臂不做该体检
 
 
 def test_atr_k_parsed_from_strategy(tmp_path):
