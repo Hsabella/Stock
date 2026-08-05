@@ -50,9 +50,14 @@ NO-GO**：主线（+roe_delta 财报因子、限池中证800、embargo 修正）
 "指数 ETF + 择时红绿灯 + 排雷器"**；红绿灯信号每日落 `results/brief/signal_log.csv` 攒实盘对账。
 用户日常只看 `results/brief/latest.md`（晨间红绿灯）；旧引擎 BUY 名单已证伪勿采信，仅风险预警可用。
 数据在 `~/.qlib/`（bin 包 + quant_warehouse parquet），不进 git；**东财资金流仅 120 天
-历史，需每周跑 fetcher 累积**（已挂 cron 周五 19:30 `scripts/weekly_data.sh`：fetcher+bootstrap+checks，
-连同工作日 09:00 `scripts/morning_brief.sh` 于 2026-07-10 装入 crontab）；
-macOS 下 qlib 大面板调用必须有 `__main__` 保护。
+历史，需每周跑 fetcher 累积**（已挂 cron 周五 19:30 `scripts/weekly_data.sh`：
+fetcher+bootstrap+**universe**+checks，连同工作日 09:00 `scripts/morning_brief.sh` 于
+2026-07-10 装入 crontab）；macOS 下 qlib 大面板调用必须有 `__main__` 保护。
+**`bootstrap` 之后必须紧跟 `universe`**：extract 是整目录替换 cn_data，而 `csi_union.txt`
+是我们自己生成、不在 release 包里的，不重建就没了（em_fundflow / ext_features /
+晨报数据体检都读它）。数据健康度由 `daily_brief.data_health()` 直接查落盘状态
+（qlib 日历落后 >14 天、资金流覆盖率 <80% 即报），不再依赖那个删掉就消音的
+`data_health_alert.txt`。
 
 ## 常用命令
 
@@ -67,7 +72,10 @@ python3 compute_factor_ic.py                           # 逐因子 IC → result
 python3 scripts/reweight_backtest.py                   # 离线再加权回测（选最优权重，可加 --ret-col ret_T+3）
 
 # 测试
-python3 -m pytest tests/ -q
+# 两个 venv 各跑各的：系统 python3 没装 qlib，直接 `pytest tests/` 会在收集
+# tests/quant/test_handler.py 时 ModuleNotFoundError 中断，一个用例都跑不到
+python3 -m pytest tests/ -q --ignore=tests/quant          # 旧引擎 13 例
+.venv-quant/bin/python -m pytest tests/quant/ -q          # quant 94 例
 
 # 可视化驾驶舱
 streamlit run dashboard/app.py                         # http://localhost:8501
@@ -88,7 +96,7 @@ streamlit run dashboard/app.py                         # http://localhost:8501
 - **composite 越大越优**；BUY 阈值 0.55；gates：fund/flow rank ≤ 0.60、liq rank ≤ 0.70。
 - **2026-05 再加权（重要）**：composite 评分只用 5 维 `fund_flow .40 / regime .25 / news .15 / fundamental .10 / chips .10`；`sector_momentum / liquidity / technical` 权重置 0（14 天 forward 实测对 T+1 反向）；**overheat penalty 已停用**。改权重前先用 `reweight_backtest.py` 在存量数据上复测 IC，别拍脑袋。
 - **验收信号好坏**：看驾驶舱"因子体检 / Forward兑现"——composite IC 是否为正、BUY 是否跑赢 DROP，且 T+3/T+5 方向一致（抗单日噪声）。当前基线 composite IC：+0.095(T+1) / +0.217(T+3)。
-- **数据源限流**：东财 `stock_individual_info_em` 等对本机 IP 限流，已用 baidu/同花顺/新浪/申万规避；部分维度偶发缺数据属正常，不阻断主流程。
+- **数据源"限流"其实是本机代理（2026-08-05 更正）**：早前判断的"东财对本机 IP 限流"是误判。真凶是 macOS 系统代理常开（`scutil --proxy` → 127.0.0.1:7897），requests 读系统代理把国内接口全绕出国 → 大面积 `ProxyError`。实测同一批抓取：走代理 2904/2949 失败(98.4%)，`NO_PROXY` 直连 3/3006 失败(0.1%)。**跑任何国内行情源的脚本都要 `. scripts/lib_no_proxy.sh`**（已接入 weekly_data / morning_brief / daily_run）；手动跑 python 模块时自己带上 `NO_PROXY`。排查时先看异常类型：`ProxyError` = 代理，别再归因 IP 封禁。旧引擎已切的替代源（同花顺/腾讯/百度）继续可用，不必回滚。
 
 ## 提交规范（重要）
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import ssl
 import sys
 import tarfile
 import tempfile
@@ -19,6 +20,24 @@ import urllib.request
 from pathlib import Path
 
 from quant.config import load_config
+
+_CHUNK = 1 << 20  # 1 MB
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """显式用 certifi 的根证书建 SSL 上下文。
+
+    python.org 版 macOS Python 装完不跑 Install Certificates.command 的话，
+    /Library/Frameworks/.../etc/openssl/ 是空的、ssl 默认信任库为空，
+    urllib 走默认上下文必然 CERTIFICATE_VERIFY_FAILED（2026-08 踩坑：
+    bootstrap 从装机起就 100% 挂，而 akshare 走 requests+certifi 所以没暴露）。
+    """
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
 
 
 def download_archive(url: str, dest: Path, force: bool = False) -> Path:
@@ -29,14 +48,22 @@ def download_archive(url: str, dest: Path, force: bool = False) -> Path:
         return dest
 
     print(f"[bootstrap] 下载 {url}")
-
-    def _hook(blocks, bs, total):
-        done = blocks * bs
-        if total > 0 and blocks % 400 == 0:
-            print(f"  ... {done / 1e6:.0f}/{total / 1e6:.0f} MB", flush=True)
-
     tmp = dest.with_suffix(".part")
-    urllib.request.urlretrieve(url, tmp, reporthook=_hook)
+    # 不用 urlretrieve：它不接受 context 参数，没法指定 certifi 根证书
+    with urllib.request.urlopen(url, timeout=60, context=_ssl_context()) as resp:
+        total = int(resp.headers.get("Content-Length") or 0)
+        done = 0
+        next_report = _CHUNK * 100
+        with open(tmp, "wb") as fh:
+            while chunk := resp.read(_CHUNK):
+                fh.write(chunk)
+                done += len(chunk)
+                if done >= next_report:
+                    print(f"  ... {done / 1e6:.0f}/{total / 1e6:.0f} MB", flush=True)
+                    next_report += _CHUNK * 100
+    if total and done < total:
+        tmp.unlink(missing_ok=True)
+        raise IOError(f"下载不完整: {done}/{total} 字节")
     tmp.rename(dest)
     print(f"[bootstrap] 下载完成: {dest} ({dest.stat().st_size / 1e6:.0f} MB)")
     return dest

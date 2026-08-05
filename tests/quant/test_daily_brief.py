@@ -68,8 +68,68 @@ def test_format_red_state_shows_recovery_line():
 
 def test_health_alert_appended(monkeypatch, tmp_path):
     (tmp_path / "data_health_alert.txt").write_text("2026-07-11 周五数据维护失败步骤: em_fundflow\n")
+    monkeypatch.setattr(daily_brief, "data_health", lambda today=None: [])
     assert _run(monkeypatch, tmp_path, lambda: dict(FAKE)) == 0
     assert "em_fundflow" in (tmp_path / "latest.md").read_text()
+
+
+def _health_cfg(tmp_path, output_name="csi_union"):
+    return {"qlib": {"provider_uri": str(tmp_path / "qlib")},
+            "warehouse": {"path": str(tmp_path / "wh")},
+            "universe": {"output_name": output_name}}
+
+
+def _write_qlib(tmp_path, last_day: str, codes: int = 100):
+    cal = tmp_path / "qlib" / "calendars"
+    cal.mkdir(parents=True, exist_ok=True)
+    (cal / "day.txt").write_text(f"2026-01-02\n{last_day}\n")
+    inst = tmp_path / "qlib" / "instruments"
+    inst.mkdir(parents=True, exist_ok=True)
+    (inst / "csi_union.txt").write_text(
+        "".join(f"SH{600000 + i}\t2020-01-01\t2026-08-05\n" for i in range(codes)))
+
+
+def _write_fundflow(tmp_path, codes: int):
+    wh = tmp_path / "wh"
+    wh.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame({"instrument": [f"SH{600000 + i}" for i in range(codes)],
+                       "datetime": pd.Timestamp("2026-08-04"), "main_net_inflow": 1.0})
+    df.set_index(["instrument", "datetime"]).to_parquet(wh / "em_fundflow.parquet")
+
+
+def test_data_health_clean_when_fresh(monkeypatch, tmp_path):
+    monkeypatch.setattr(daily_brief, "load_config", lambda _: _health_cfg(tmp_path))
+    _write_qlib(tmp_path, "2026-08-04")
+    _write_fundflow(tmp_path, 90)  # 90/100 = 90% > 80%
+    assert daily_brief.data_health(pd.Timestamp("2026-08-05")) == []
+
+
+def test_data_health_flags_stale_qlib_and_thin_fundflow(monkeypatch, tmp_path):
+    monkeypatch.setattr(daily_brief, "load_config", lambda _: _health_cfg(tmp_path))
+    _write_qlib(tmp_path, "2026-07-03")
+    _write_fundflow(tmp_path, 40)  # 40/100 = 40% < 80%
+    issues = daily_brief.data_health(pd.Timestamp("2026-08-05"))
+    assert len(issues) == 2
+    assert "落后 33 天" in issues[0] and "bootstrap" in issues[0]
+    assert "40/100" in issues[1] and "em_fundflow" in issues[1]
+
+
+def test_data_health_reports_missing_artifacts(monkeypatch, tmp_path):
+    monkeypatch.setattr(daily_brief, "load_config", lambda _: _health_cfg(tmp_path))
+    issues = daily_brief.data_health(pd.Timestamp("2026-08-05"))
+    assert any("qlib 数据包缺失" in i for i in issues)
+    assert any("资金流仓库为空" in i for i in issues)
+
+
+def test_data_health_survives_probe_failure(monkeypatch, tmp_path):
+    """体检自身抛错不能拖垮晨报——红绿灯比数据告警重要。"""
+    def boom(_):
+        raise RuntimeError("配置读不到")
+
+    monkeypatch.setattr(daily_brief, "load_config", boom)
+    assert _run(monkeypatch, tmp_path, lambda: dict(FAKE)) == 0
+    text = (tmp_path / "latest.md").read_text()
+    assert "数据体检自身失败" in text and "🟢" in text
 
 
 FAKE_LIGHTS = [

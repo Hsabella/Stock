@@ -8,6 +8,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 PY=.venv-quant/bin/python
+. scripts/lib_no_proxy.sh   # 国内行情源绕过系统代理（不绕过 GitHub, bootstrap 仍走代理）
 
 mkdir -p logs results/brief
 # 并发锁：上一轮挂死或手动补跑撞上 cron 时直接退出（macOS 无 flock，用 mkdir 原子性）
@@ -31,6 +32,10 @@ step() {
   step "index_daily" $PY -m quant.data.index_daily
   step "industry"    $PY -m quant.data.industry
   step "bootstrap"   $PY -m quant.data.bootstrap --force-download
+  # 必须紧跟 bootstrap：extract 会把整个 cn_data 目录替换掉，
+  # csi_union.txt 是我们自己生成的、不在 release 包里，不重建就没了
+  # （em_fundflow / ext_features / daily_brief 体检都读它）
+  step "universe"    $PY -m quant.data.universe
   step "checks"      $PY -m quant.data.checks
   if [ -n "$FAILED" ]; then
     echo "===== 完成(失败:$FAILED) $(date '+%F %T') ====="

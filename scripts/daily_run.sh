@@ -14,6 +14,7 @@ TS="$(date +%Y%m%d_%H%M%S)"
 LOG="$LOG_DIR/daily_${TS}.log"
 
 cd "$REPO"
+. scripts/lib_no_proxy.sh   # 国内行情源绕过系统代理（新闻/资金流/日线全走这里）
 {
     echo "=== daily_run started: $(date) ==="
     "$PY" scripts/run_partial_engine.py

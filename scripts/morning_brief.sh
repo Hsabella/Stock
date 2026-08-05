@@ -6,6 +6,7 @@
 # 日志: logs/brief.log（只留最近 500 行）
 set -u
 cd "$(dirname "$0")/.." || exit 1
+. scripts/lib_no_proxy.sh   # 国内行情源绕过系统代理（K线/指数缓存刷新走这里）
 
 mkdir -p logs results/brief
 {
