@@ -414,6 +414,61 @@ def append_stock_lamps_log(path: Path, b: dict) -> None:
         path.write_text(content + added)
 
 
+#: qlib 日线包允许落后的自然日数（周更 + 长假，14 天内不报）
+QLIB_STALE_DAYS = 14
+#: 东财资金流仓库覆盖率下限（占全池比例），低于此判定为"没攒起来"。
+#: 分母是 csi_union 全历史去重代码数(~3387)，而 fetcher 只拉 since 之后仍在池的(~2949)，
+#: 所以一次完美抓取约 87%——阈值别往上调，否则天天误报。
+FUNDFLOW_MIN_COVERAGE = 0.80
+
+
+def data_health(today: pd.Timestamp | None = None) -> list[str]:
+    """直接体检落盘数据，返回问题清单（空=健康）。
+
+    2026-08-05 起不再只依赖 weekly_data.sh 写的 data_health_alert.txt——那个文件
+    手动 rm 就能消音，而故障还在（实际发生过：8/2 三步全挂，8/5 告警文件被删，
+    问题一个没修）。这里直接查数据本身的状态，删不掉也骗不过。
+    """
+    today = pd.Timestamp(today).normalize() if today is not None else pd.Timestamp.now().normalize()
+    issues: list[str] = []
+    cfg = load_config("data")
+
+    cal = Path(cfg["qlib"]["provider_uri"]).expanduser() / "calendars" / "day.txt"
+    if not cal.exists():
+        issues.append(f"qlib 数据包缺失（{cal} 不存在）→ 跑 quant.data.bootstrap")
+    else:
+        last = pd.Timestamp(cal.read_text().strip().splitlines()[-1])
+        lag = (today - last).days
+        if lag > QLIB_STALE_DAYS:
+            issues.append(f"qlib 日线止于 {last:%Y-%m-%d}（落后 {lag} 天）→ 跑 quant.data.bootstrap")
+
+    ff = Path(cfg["warehouse"]["path"]).expanduser() / "em_fundflow.parquet"
+    if not ff.exists():
+        issues.append("东财资金流仓库为空 → 跑 akshare_fetcher --dataset em_fundflow --refresh")
+    else:
+        try:
+            # 用 pyarrow 只读一列：instrument 在 parquet 里是索引层，read_parquet
+            # 带 columns= 会因还原索引而 KeyError
+            import pyarrow.parquet as pq
+
+            n = pq.read_table(ff, columns=["instrument"])["instrument"].to_pandas().nunique()
+        except Exception as e:  # 仓库损坏也要报出来，不能静默当健康
+            issues.append(f"东财资金流仓库读取失败: {type(e).__name__}: {e}")
+        else:
+            # 全池 = qlib instruments 里的 csi_union（每只可能多行区间，去重取代码列）
+            inst = (Path(cfg["qlib"]["provider_uri"]).expanduser() / "instruments"
+                    / f"{cfg['universe']['output_name']}.txt")
+            total = 0
+            if inst.exists():
+                total = len({ln.split("\t")[0] for ln in inst.read_text().splitlines() if ln.strip()})
+            if total and n < total * FUNDFLOW_MIN_COVERAGE:
+                issues.append(
+                    f"东财资金流仅覆盖 {n}/{total} 只（<{FUNDFLOW_MIN_COVERAGE:.0%}）"
+                    "→ 跑 akshare_fetcher --dataset em_fundflow --refresh"
+                )
+    return issues
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, default=None)
@@ -430,6 +485,11 @@ def main() -> int:
         alert = args.out_dir / "data_health_alert.txt"  # weekly_data.sh 失败时写入，成功后清除
         if alert.exists():
             text += f"\n⚠️ {alert.read_text().strip()}"
+    try:  # 体检失败不能拖垮晨报——红绿灯比数据告警重要
+        for issue in data_health(b["date"] if b else None):
+            text += f"\n⚠️ 数据体检: {issue}"
+    except Exception as e:
+        text += f"\n⚠️ 数据体检自身失败: {type(e).__name__}: {e}"
     text += f"\n（生成于 {pd.Timestamp.now():%Y-%m-%d %H:%M}）"
 
     print(text)
