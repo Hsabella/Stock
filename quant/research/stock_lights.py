@@ -507,7 +507,8 @@ def lamp_rows(today: pd.Timestamp | None = None) -> dict:
     today = today or pd.Timestamp.today().normalize()
     with open(REPO / "watchlist.yaml", encoding="utf-8") as f:
         items = (yaml.safe_load(f) or {}).get("watchlist", [])
-    items = [it for it in items if not portfolio.is_etf(str(it["symbol"]))]
+    items = [it for it in portfolio.dedupe_watchlist(items)
+             if not portfolio.is_etf(str(it["symbol"]))]
     rows, any_stale = [], False
     for it in items:
         sym = str(it["symbol"]).zfill(6)
@@ -550,7 +551,7 @@ def status(thr: float = PRIMARY_THR) -> None:
           f"（灯截至 {max(g.index[-1] for g in greens.values()).date()}）\n")
 
     rows = []
-    for it in cfg.get("watchlist", []):
+    for it in portfolio.dedupe_watchlist(cfg.get("watchlist", [])):
         sym = str(it["symbol"]).zfill(6)
         if portfolio.is_etf(sym):  # ETF 不打灯（未回测），晨报走【ETF观察】
             continue
