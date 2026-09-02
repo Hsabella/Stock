@@ -3,7 +3,7 @@
 只读三个数据源，全部 REPO 锚定路径、与 cwd 无关：
 - watchlist.yaml：HELD 持仓 + account / target_structure / hard_stop_pct 配置
 - cache/kline/<symbol>_daily_qfq.csv：旧引擎 18:30 刷新的共享 K 线缓存；
-  末日落后超 STALE_TRADING_DAYS 个交易日 → akshare 现拉降级并标 ⚠️
+  末日落后超 STALE_TRADING_DAYS 个交易日 → akshare 现拉降级回写；仍追不上才标 ⚠️
 - results/decisions/partial_<date>.csv：旧引擎最新决策（排雷信号按 symbol 匹配，
   CSV 的 state 列可能滞后于 watchlist，不采信）
 
@@ -13,6 +13,7 @@ _atr 复制自 factors/technical/dim.py:54。
 from __future__ import annotations
 
 import ast
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -22,19 +23,45 @@ REPO = Path(__file__).resolve().parents[2]
 WATCHLIST = REPO / "watchlist.yaml"
 KLINE_DIR = REPO / "cache" / "kline"
 DEC_DIR = REPO / "results" / "decisions"
-STALE_TRADING_DAYS = 3
-ETF_STALE_TRADING_DAYS = 1  # ETF 缓存无旧引擎夜刷，晨报必须拿到上一交易日收盘
+STALE_TRADING_DAYS = 1  # 缓存末日落后上一交易日即算陈旧 → 现拉降级。
+#   个股原为 3：晨报 today = 指数末日+1BDay，所以落后 1 = 正常、落后 2 = 少一根 K 线，
+#   3 的容忍度会把"旧引擎漏跑一晚"整个吞掉——2026-09-02 实盘踩过：daily_run 09-01 没跑，
+#   晨报拿 08-31 收盘当"现价"且不标 ⚠️，止损距离虚报 +8.6%（实际 +5.1%）。
+MIN_CACHE_ROWS = 140  # 回写下限：抄底灯 dd120+信号窗要 140 根，低于此数的应答一律当残缺
+FETCH_PAUSE_S = 0.15  # 现拉之间的间隔，与旧引擎 run_partial_engine 同一量级。
+#   缓存命中不 sleep，只在真走网络时付这个钱：旧引擎漏跑一晚时全 130+ 只票会一起现拉，
+#   连珠炮打免费接口容易被掐（多花约 20s，换一次批量刷新不半途失败）。
 ATR_N = 14
 TRAIL_WINDOW = 20  # ATR 追踪线的滚动最高收盘窗口（趋势读数用；止损锚点是 since-entry，见 stop_lines）
 LEFT_INIT_ATR_K = 3.0  # 左侧臂初始止损 = 入场价 - 3×ATR14(信号日)；与 stock_lights.py LEFT_STOP_ATR 同源定案
 ARM_SUSPECT_DD = -0.25  # 左臂标注体检：入场时距 120 日高应 ≤ -25%（抄底灯 setup 最浅档），不满足疑似标错臂
 ETF_PREFIXES = ("51", "56", "58", "159")  # 沪 51x/56x/58x + 深 159x；LOF/封基不算
 DD_WINDOW = 120  # ETF 观察的"距 N 日最高收盘"窗口（与抄底灯 setup 同口径，便于对照）
+STATE_RANK = {"HELD": 0, "EXITED": 1, "WATCHING": 2, "NONE": 3}  # 同一 symbol 重复登记时的取舍序
 
 
 def is_etf(symbol: str) -> bool:
     """场内 ETF 代码段判定（与 factors/_kline.py 的副本保持一致，venv 隔离不互相 import）。"""
     return str(symbol).startswith(ETF_PREFIXES)
+
+
+def dedupe_watchlist(items: list[dict]) -> list[dict]:
+    """watchlist 条目按 symbol 去重，保留状态最强的那条（HELD > EXITED > WATCHING > NONE）。
+
+    watchlist.yaml 是手工维护 + 批量扫描追加的，同一只票很容易被登记两次。持仓票若
+    以 WATCHING 的身份漏出来，就会绕过抄底灯的"持仓票不列入"过滤被当成新钱候选
+    ——2026-09-02 实盘踩过：002487 大金重工 同时挂着 HELD 和 WATCHING，晨报把自己的
+    持仓推荐成了抄底标的。yaml 那边已经改干净，这里兜底，防再犯。
+    """
+    best: dict[str, dict] = {}
+    for it in items:
+        sym = str(it["symbol"]).zfill(6)
+        cur = best.get(sym)
+        fallback = len(STATE_RANK)
+        if cur is None or (STATE_RANK.get(str(it.get("state", "")), fallback)
+                           < STATE_RANK.get(str(cur.get("state", "")), fallback)):
+            best[sym] = it
+    return list(best.values())
 
 
 def load_portfolio_config(path: Path = WATCHLIST) -> dict:
@@ -45,7 +72,7 @@ def load_portfolio_config(path: Path = WATCHLIST) -> dict:
     """
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
-    items = cfg.get("watchlist", [])
+    items = dedupe_watchlist(cfg.get("watchlist", []))
     held = [it for it in items if it.get("state") == "HELD"]
     exited = [it for it in items if it.get("state") == "EXITED" and it.get("exit_date")]
     etf_watching = [it for it in items
@@ -87,11 +114,19 @@ def _fetch_etf_kline(symbol: str, start: str, end: str) -> pd.DataFrame:
     return df.sort_values("date")
 
 
-def load_kline(symbol: str, today: pd.Timestamp) -> tuple[pd.DataFrame, bool]:
-    """(日K df[date/open/high/low/close], 是否陈旧)。缓存陈旧时降级 akshare 现拉。
+def _lag(df: pd.DataFrame, today: pd.Timestamp) -> int:
+    """缓存末日距 today 的交易日数（工作日近似）。晨报的 today = 指数末日+1BDay，
+    所以"数据齐"时恒为 1；节假日不会虚增，因为 today 本身就是从指数日历推出来的。"""
+    return len(pd.bdate_range(df["date"].iloc[-1], today)) - 1
 
-    ETF 与个股两点不同：陈旧阈值 1 交易日（旧引擎 18:30 只刷个股缓存，ETF 缓存
-    由本层现拉回写维护）；数据源走东财 fund_etf_hist_em（qfq）。
+
+def load_kline(symbol: str, today: pd.Timestamp) -> tuple[pd.DataFrame, bool]:
+    """(日K df[date/open/high/low/close], 是否陈旧)。缓存陈旧时降级 akshare 现拉并回写。
+
+    ETF 与个股只剩数据源一处不同：ETF 走东财 fund_etf_hist_em（qfq），个股走新浪
+    stock_zh_a_daily。陈旧阈值与回写路径两者一致——现拉回来不落盘的话，旧引擎没覆盖
+    到的票每天早上都要重新下载一遍且缓存永远停在老日期（2026-09-02 实盘踩过：
+    30 只优质股池新票的缓存卡在 08-07 三周没动，每天白跑 30 次网络请求）。
     """
     p = KLINE_DIR / f"{symbol}_daily_qfq.csv"
     df = pd.DataFrame()
@@ -101,8 +136,7 @@ def load_kline(symbol: str, today: pd.Timestamp) -> tuple[pd.DataFrame, bool]:
         except Exception:
             df = pd.DataFrame()
     etf = is_etf(symbol)
-    max_lag = ETF_STALE_TRADING_DAYS if etf else STALE_TRADING_DAYS
-    stale = df.empty or len(pd.bdate_range(df["date"].iloc[-1], today)) - 1 > max_lag
+    stale = df.empty or _lag(df, today) > STALE_TRADING_DAYS
     if stale:
         try:
             # 400 日历日 ≈ 270 交易日：抄底灯的 dd120+信号窗要 140 根，无缓存也够
@@ -119,16 +153,32 @@ def load_kline(symbol: str, today: pd.Timestamp) -> tuple[pd.DataFrame, bool]:
                 fresh["date"] = pd.to_datetime(fresh["date"])
                 fresh = fresh.sort_values("date")
             fresh = fresh[fresh["date"] < today]  # 盘中重跑时丢掉当日未收线的 bar
-            if not df.empty:  # 与旧缓存拼接保长历史（除权日复权口径或有微差，以新段为准）
+            if fresh.empty:
+                raise ValueError(f"{symbol} 现拉返回空")  # 别拿空表覆盖缓存
+            cached_len = len(df)
+            cached_last = df["date"].iloc[-1] if cached_len else None
+            # 与旧缓存拼接保长历史（除权日复权口径或有微差，以新段为准）。
+            # 两段必须相接：若新段起点还在旧缓存末日之后，中间就是空洞，拼起来会让
+            # ATR/dd120 算在断裂的序列上——这种情况宁可只留新段。
+            if not df.empty and fresh["date"].iloc[0] <= df["date"].iloc[-1]:
                 fresh = pd.concat([df[df["date"] < fresh["date"].iloc[0]], fresh])
             df = fresh.reset_index(drop=True)
-            if etf:  # ETF 缓存归本层所有，回写后次日命中缓存不再重拉
+            # 回写门槛：确实往前推进了，且长度够 min(原有, 140)——够抄底灯用即可，
+            # 且从不要求比原来更多（无缓存时门槛为 0，新票历史短也照写）。
+            # 别写成"不准比旧缓存短"：现拉窗口固定 400 日历日，比攒久了的缓存短是常态，
+            # 那样卡会把正常刷新整片挡掉（本次改动初版就是这么写的，30 只票一只没刷上）。
+            advanced = cached_last is None or df["date"].iloc[-1] > cached_last
+            if advanced and len(df) >= min(cached_len, MIN_CACHE_ROWS):
                 KLINE_DIR.mkdir(parents=True, exist_ok=True)
-                df.to_csv(p, index=False)
-                # 晨间现拉对 ETF 是常态路径而非降级，拉全了就不标 ⚠️
-                stale = len(pd.bdate_range(df["date"].iloc[-1], today)) - 1 > max_lag
-        except Exception:
-            pass  # 现拉也失败 → 返回旧数据（stale=True 由调用方标 ⚠️）
+                df.to_csv(p, index=False)  # 次日命中缓存，不再重复下载
+            # 现拉成功=已经拿到源上最新的，不是降级，别再标 ⚠️；仍追不上才是真陈旧（停牌/源滞后）
+            stale = _lag(df, today) > STALE_TRADING_DAYS
+        except Exception as ex:
+            # 现拉失败 → 返回旧数据（stale=True 由调用方标 ⚠️）。必须留痕：静默吞掉的话，
+            # 批量刷新被源端掐断只会表现为"某些票的缓存莫名不更新"，很难查。
+            print(f"  [kline] {symbol} 现拉失败，沿用缓存: {type(ex).__name__}: {ex}")
+        finally:
+            time.sleep(FETCH_PAUSE_S)
     return df, stale
 
 

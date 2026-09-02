@@ -343,8 +343,21 @@ def test_load_kline_etf_routes_to_em_and_writes_cache(monkeypatch, tmp_path):
     assert len(cached) == len(df)                          # 回写成功，次日命中缓存
 
 
-def test_load_kline_etf_stale_threshold_one_day(monkeypatch, tmp_path):
-    """同样落后 2 个交易日的缓存：ETF 触发现拉（阈值1），个股不触发（阈值3）。"""
+def _sina_frame(dates, close=1.0):
+    """伪造 stock_zh_a_daily 返回（新浪列名已是英文小写）。"""
+    n = len(dates)
+    return pd.DataFrame({
+        "date": [str(d.date()) for d in dates],
+        "open": [close] * n, "high": [close * 1.01] * n,
+        "low": [close * 0.99] * n, "close": [close] * n, "volume": [1e6] * n})
+
+
+def test_load_kline_stale_threshold_is_one_day_for_stocks_too(monkeypatch, tmp_path):
+    """落后 2 个交易日：个股和 ETF 都现拉。
+
+    个股阈值原为 3，会把"旧引擎漏跑一晚"整个吞掉——晨报照常拿前天的收盘当"现价"，
+    连 ⚠️ 都不标（2026-09-02 实盘：止损距离虚报 +8.6%，实际 +5.1%）。
+    """
     import types
 
     dates = pd.bdate_range(end="2026-07-16", periods=40)   # 缓存末日=周四
@@ -352,19 +365,142 @@ def test_load_kline_etf_stale_threshold_one_day(monkeypatch, tmp_path):
     base = _kline(n=40).assign(date=dates)
     base.to_csv(tmp_path / "515050_daily_qfq.csv", index=False)
     base.to_csv(tmp_path / "600000_daily_qfq.csv", index=False)
+    fresh_dates = pd.bdate_range(end="2026-07-17", periods=60)
     calls = []
     fake = types.SimpleNamespace(
-        fund_etf_hist_em=lambda **kw: calls.append("etf") or _etf_em_frame(
-            pd.bdate_range(end="2026-07-17", periods=60)),
-        stock_zh_a_daily=lambda **kw: calls.append("stock") or None)
+        fund_etf_hist_em=lambda **kw: calls.append("etf") or _etf_em_frame(fresh_dates),
+        stock_zh_a_daily=lambda **kw: calls.append("stock") or _sina_frame(fresh_dates))
     monkeypatch.setitem(sys.modules, "akshare", fake)
     monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
 
-    df, _ = portfolio.load_kline("515050", today)
-    assert calls == ["etf"]                                # ETF 现拉了
+    df, stale = portfolio.load_kline("515050", today)
+    assert calls == ["etf"] and not stale
     assert str(df["date"].iloc[-1].date()) == "2026-07-17"
+    df, stale = portfolio.load_kline("600000", today)
+    assert calls == ["etf", "stock"]                       # 个股也现拉了
+    assert str(df["date"].iloc[-1].date()) == "2026-07-17" and not stale
+
+
+def test_load_kline_stock_writes_back_cache(monkeypatch, tmp_path):
+    """个股现拉后必须回写：不回写的话缓存永远停在老日期，每天早上白下载一遍
+    （2026-09-02 实盘：30 只优质股池新票卡在 08-07 三周没动）。"""
+    import types
+
+    today = pd.Timestamp("2026-07-20")
+    _kline(n=40).assign(date=pd.bdate_range(end="2026-07-06", periods=40)).to_csv(
+        tmp_path / "600000_daily_qfq.csv", index=False)
+    fresh_dates = pd.bdate_range(end="2026-07-17", periods=60)
+    calls = []
+    monkeypatch.setitem(sys.modules, "akshare", types.SimpleNamespace(
+        stock_zh_a_daily=lambda **kw: calls.append(1) or _sina_frame(fresh_dates)))
+    monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
+
+    portfolio.load_kline("600000", today)
+    cached = pd.read_csv(tmp_path / "600000_daily_qfq.csv", parse_dates=["date"])
+    assert str(cached["date"].iloc[-1].date()) == "2026-07-17"
+    _, stale = portfolio.load_kline("600000", today)       # 次日/再次调用命中缓存
+    assert len(calls) == 1 and not stale                   # 没有第二次网络请求
+
+
+def test_load_kline_writeback_rejects_stub_response(monkeypatch, tmp_path):
+    """源端残缺应答（只回几根 K 线）不得削掉已有历史——抄底灯要 140 根，削穿就灭灯。"""
+    import types
+
+    today = pd.Timestamp("2026-07-20")
+    _kline(n=200).assign(date=pd.bdate_range(end="2026-07-06", periods=200)).to_csv(
+        tmp_path / "600000_daily_qfq.csv", index=False)
+    # 残缺应答：起点早于旧缓存起点 → 前缀为空，拼接后只剩 3 根
+    stub = _sina_frame(pd.DatetimeIndex(["2025-01-06", "2026-07-16", "2026-07-17"]))
+    monkeypatch.setitem(sys.modules, "akshare", types.SimpleNamespace(
+        stock_zh_a_daily=lambda **kw: stub.copy()))
+    monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
+
+    portfolio.load_kline("600000", today)
+    cached = pd.read_csv(tmp_path / "600000_daily_qfq.csv", parse_dates=["date"])
+    assert len(cached) == 200                              # 缓存原样保留，没被截短
+
+
+def test_load_kline_writeback_allows_fully_superseding_refresh(monkeypatch, tmp_path):
+    """新段完全覆盖旧缓存（前缀为空）时照样回写——这是最常见的刷新形态，不能被守卫挡掉。
+
+    初版守卫写成"回写结果不准比旧缓存短"，正好卡死这种情况：2026-09-02 实盘 30 只票
+    的缓存停在 08-07 一动不动，每天早上还照样重下一遍。
+    """
+    import types
+
+    today = pd.Timestamp("2026-07-20")
+    old_dates = pd.bdate_range(end="2026-07-06", periods=200)
+    _kline(n=200).assign(date=old_dates).to_csv(
+        tmp_path / "600000_daily_qfq.csv", index=False)
+    fresh_dates = pd.bdate_range(end="2026-07-17", periods=250)
+    assert fresh_dates[0] < old_dates[0]                   # 新段起点更早 → 前缀为空
+    monkeypatch.setitem(sys.modules, "akshare", types.SimpleNamespace(
+        stock_zh_a_daily=lambda **kw: _sina_frame(fresh_dates)))
+    monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
+
     _, stale = portfolio.load_kline("600000", today)
-    assert calls == ["etf"] and not stale                  # 个股 2 天内不算陈旧，没现拉
+    cached = pd.read_csv(tmp_path / "600000_daily_qfq.csv", parse_dates=["date"])
+    assert not stale and len(cached) == 250                # 整段换新，没有旧前缀残留
+    assert str(cached["date"].iloc[-1].date()) == "2026-07-17"
+
+
+def test_load_kline_drops_disjoint_old_cache(monkeypatch, tmp_path):
+    """旧缓存与新段之间有空洞时只留新段——拼出断裂序列会让 ATR/dd120 算错。"""
+    import types
+
+    today = pd.Timestamp("2026-07-20")
+    _kline(n=30).assign(date=pd.bdate_range(end="2024-01-05", periods=30)).to_csv(
+        tmp_path / "600000_daily_qfq.csv", index=False)          # 旧缓存停在 2024 初
+    fresh_dates = pd.bdate_range(end="2026-07-17", periods=60)
+    monkeypatch.setitem(sys.modules, "akshare", types.SimpleNamespace(
+        stock_zh_a_daily=lambda **kw: _sina_frame(fresh_dates)))
+    monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
+
+    df, stale = portfolio.load_kline("600000", today)
+    assert len(df) == 60 and not stale                           # 2024 那段被丢掉
+    assert df["date"].iloc[0] == fresh_dates[0]
+
+
+def test_load_kline_empty_response_keeps_cache(monkeypatch, tmp_path):
+    """现拉返回空表时保留旧缓存并标 ⚠️，绝不用空表覆盖。"""
+    import types
+
+    today = pd.Timestamp("2026-07-20")
+    _kline(n=40).assign(date=pd.bdate_range(end="2026-07-06", periods=40)).to_csv(
+        tmp_path / "600000_daily_qfq.csv", index=False)
+    monkeypatch.setitem(sys.modules, "akshare", types.SimpleNamespace(
+        stock_zh_a_daily=lambda **kw: _sina_frame(pd.DatetimeIndex([]))))
+    monkeypatch.setattr(portfolio, "KLINE_DIR", tmp_path)
+
+    df, stale = portfolio.load_kline("600000", today)
+    assert stale and len(df) == 40
+    assert len(pd.read_csv(tmp_path / "600000_daily_qfq.csv")) == 40
+
+
+def test_dedupe_watchlist_prefers_held(tmp_path):
+    """同一 symbol 重复登记时取状态最强的那条：持仓票不能以 WATCHING 的身份漏出去，
+    否则绕过抄底灯的"持仓票不列入"过滤，被当成新钱候选（2026-09-02 实盘踩过）。"""
+    items = [
+        {"symbol": "002487", "name": "大金重工", "state": "HELD", "position": 200},
+        {"symbol": "002487", "name": "大金重工", "state": "WATCHING"},
+        {"symbol": "600000", "name": "浦发银行", "state": "WATCHING"},
+    ]
+    out = portfolio.dedupe_watchlist(items)
+    assert [it["symbol"] for it in out] == ["002487", "600000"]   # 原序保留
+    assert out[0]["state"] == "HELD" and out[0]["position"] == 200
+    # 反序登记也一样取 HELD（与 yaml 里谁先谁后无关）
+    back = {it["symbol"]: it for it in portfolio.dedupe_watchlist(items[::-1])}
+    assert back["002487"]["state"] == "HELD"
+
+
+def test_watchlist_yaml_has_no_duplicate_symbols():
+    """真实 watchlist.yaml 守门：同一只票只准出现一次。"""
+    import yaml
+    with open(portfolio.WATCHLIST, encoding="utf-8") as f:
+        items = (yaml.safe_load(f) or {}).get("watchlist", [])
+    syms = [str(it["symbol"]).zfill(6) for it in items]
+    dups = sorted({s for s in syms if syms.count(s) > 1})
+    assert not dups, f"watchlist.yaml 重复登记: {dups}"
 
 
 def test_load_kline_etf_drops_intraday_bar(monkeypatch, tmp_path):
