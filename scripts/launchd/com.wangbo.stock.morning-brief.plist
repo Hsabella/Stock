@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 晨间仓位红绿灯，工作日 09:00
+     由 scripts/install_schedule.sh 渲染 @REPO@ 后装到 ~/Library/LaunchAgents/。
+     选 launchd 而非 cron：机器睡过了点，launchd 会在唤醒后补跑，cron 直接丢。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.wangbo.stock.morning-brief</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@REPO@/scripts/morning_brief.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>@REPO@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>RunAtLoad</key><false/>
+  <!-- cron 时代这行连重定向都没有，脚本自己开始记日志之前挂掉就无声无息 -->
+  <key>StandardOutPath</key><string>@REPO@/logs/launchd_morning_brief.log</string>
+  <key>StandardErrorPath</key><string>@REPO@/logs/launchd_morning_brief.log</string>
+</dict>
+</plist>

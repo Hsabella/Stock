@@ -9,7 +9,7 @@ A 股自选股决策引擎：收盘后从 8 个维度给 watchlist 打分 + 状�
 ```bash
 # 全部用独立 venv: .venv-quant（pyqlib+lightgbm+akshare）
 .venv-quant/bin/python -m quant.live.daily_brief      # 晨间仓位建议(用户每日唯一必看,
-                                                      #  cron 工作日 09:00 → results/brief/latest.md;
+                                                      #  launchd 工作日 09:00 → results/brief/latest.md;
                                                       #  2026-07-16 起含结构灯/持仓健康度/结构修正跟踪,
                                                       #  2026-07-17 起含回补观察(EXITED+exit_date 票的接回三条件),
                                                       #  2026-07-19 起含个股抄底灯(左侧L6/L1, 落 stock_lamps_log.csv),
@@ -50,9 +50,15 @@ NO-GO**：主线（+roe_delta 财报因子、限池中证800、embargo 修正）
 "指数 ETF + 择时红绿灯 + 排雷器"**；红绿灯信号每日落 `results/brief/signal_log.csv` 攒实盘对账。
 用户日常只看 `results/brief/latest.md`（晨间红绿灯）；旧引擎 BUY 名单已证伪勿采信，仅风险预警可用。
 数据在 `~/.qlib/`（bin 包 + quant_warehouse parquet），不进 git；**东财资金流仅 120 天
-历史，需每周跑 fetcher 累积**（已挂 cron 周五 19:30 `scripts/weekly_data.sh`：
-fetcher+bootstrap+**universe**+checks，连同工作日 09:00 `scripts/morning_brief.sh` 于
-2026-07-10 装入 crontab）；macOS 下 qlib 大面板调用必须有 `__main__` 保护。
+历史，需每周跑 fetcher 累积**（周五 19:30 `scripts/weekly_data.sh`：
+fetcher+bootstrap+**universe**+checks，连同工作日 09:00 `scripts/morning_brief.sh`
+与 18:30 `scripts/daily_run.sh`）；macOS 下 qlib 大面板调用必须有 `__main__` 保护。
+**这三个定时任务 2026-09-02 从 cron 迁到 launchd**（`./scripts/install_schedule.sh`
+安装，plist 模板在 `scripts/launchd/`，`--uninstall` 卸下）：macOS 的 cron 在机器睡眠时
+不触发、醒来也不补跑，实测 08-20 / 08-27 / 09-01 三晚 daily_run 就这么静默丢了，
+连带 cache/kline 停在上一交易日、晨报拿隔日收盘当"现价"。launchd 的
+StartCalendarInterval 会在唤醒后补跑错过的那次。改调度时间改 plist 后重跑安装脚本，
+别再往 crontab 里加。
 **`bootstrap` 之后必须紧跟 `universe`**：extract 是整目录替换 cn_data，而 `csi_union.txt`
 是我们自己生成、不在 release 包里的，不重建就没了（em_fundflow / ext_features /
 晨报数据体检都读它）。数据健康度由 `daily_brief.data_health()` 直接查落盘状态
@@ -62,7 +68,7 @@ fetcher+bootstrap+**universe**+checks，连同工作日 09:00 `scripts/morning_b
 ## 常用命令
 
 ```bash
-# 一键全套（引擎 + 报告 + forward 校验，cron 入口）
+# 一键全套（引擎 + 报告 + forward 校验，launchd 入口，工作日 18:30）
 ./scripts/daily_run.sh
 
 # 分步
