@@ -22,6 +22,8 @@ from pathlib import Path
 from quant.config import load_config
 
 _CHUNK = 1 << 20  # 1 MB
+_MAX_ATTEMPT = 30  # 每轮至少推进一点就不算浪费；跨代理下载 560MB 常要十几轮
+_READ_TIMEOUT = 90
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -40,8 +42,51 @@ def _ssl_context() -> ssl.SSLContext:
         return ssl.create_default_context()
 
 
+def _remote_size(url: str) -> int:
+    """HEAD 拿 Content-Length（跟随重定向）；拿不到返回 0。"""
+    req = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=_ssl_context()) as resp:
+            return int(resp.headers.get("Content-Length") or 0)
+    except Exception:
+        return 0
+
+
+def _download_once(url: str, tmp: Path, total: int) -> int:
+    """从 tmp 已有字节处断点续传一轮，返回本轮结束时的文件大小。
+
+    异常不外抛：单轮失败（超时/连接断）属常态，由上层循环换新连接再续。
+    """
+    have = tmp.stat().st_size if tmp.exists() else 0
+    req = urllib.request.Request(url)
+    if have:
+        req.add_header("Range", f"bytes={have}-")
+
+    # 不用 urlretrieve：它不接受 context 参数，没法指定 certifi 根证书
+    with urllib.request.urlopen(req, timeout=_READ_TIMEOUT, context=_ssl_context()) as resp:
+        # 服务端不认 Range（200 而非 206）就只能从头写，否则会把响应接在残包后面写坏
+        mode = "ab" if resp.status == 206 else "wb"
+        if mode == "wb":
+            have = 0
+        next_report = have + _CHUNK * 100
+        with open(tmp, mode) as fh:
+            while chunk := resp.read(_CHUNK):
+                fh.write(chunk)
+                have += len(chunk)
+                if have >= next_report:
+                    print(f"  ... {have / 1e6:.0f}/{total / 1e6:.0f} MB", flush=True)
+                    next_report += _CHUNK * 100
+    return have
+
+
 def download_archive(url: str, dest: Path, force: bool = False) -> Path:
-    """下载 release 包；已存在且非 force 时直接复用。"""
+    """下载 release 包（断点续传 + 多轮重试）；已存在且非 force 时直接复用。
+
+    必须能续传：包 ~560MB，跨代理下载单条连接经常中途卡死。2026-08-09 周五维护
+    就是死在这——原实现一条连接读到底、无重试无续传，一个 read timeout 就整包作废，
+    bootstrap 非零退出后 extract 根本没执行，cn_data 悄悄停在 08-04 又过了一周。
+    （注意 cron 里 bootstrap 走系统代理，不在 lib_no_proxy.sh 的绕过名单内。）
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and not force:
         print(f"[bootstrap] 复用已有归档: {dest} ({dest.stat().st_size / 1e6:.0f} MB)")
@@ -49,22 +94,30 @@ def download_archive(url: str, dest: Path, force: bool = False) -> Path:
 
     print(f"[bootstrap] 下载 {url}")
     tmp = dest.with_suffix(".part")
-    # 不用 urlretrieve：它不接受 context 参数，没法指定 certifi 根证书
-    with urllib.request.urlopen(url, timeout=60, context=_ssl_context()) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = 0
-        next_report = _CHUNK * 100
-        with open(tmp, "wb") as fh:
-            while chunk := resp.read(_CHUNK):
-                fh.write(chunk)
-                done += len(chunk)
-                if done >= next_report:
-                    print(f"  ... {done / 1e6:.0f}/{total / 1e6:.0f} MB", flush=True)
-                    next_report += _CHUNK * 100
-    if total and done < total:
-        tmp.unlink(missing_ok=True)
-        raise IOError(f"下载不完整: {done}/{total} 字节")
-    tmp.rename(dest)
+    total = _remote_size(url)
+    if force:
+        tmp.unlink(missing_ok=True)  # force 是"我要最新包"，残包可能是上个 release 的
+
+    last_size = -1
+    for attempt in range(1, _MAX_ATTEMPT + 1):
+        try:
+            size = _download_once(url, tmp, total)
+            if not total:
+                break  # 拿不到 Content-Length 时，一轮读到流结束就只能认为下完了
+        except Exception as e:  # 超时/连接重置/代理抖动，换连接重来
+            size = tmp.stat().st_size if tmp.exists() else 0
+            print(f"[bootstrap] 第 {attempt} 轮中断({type(e).__name__})，已下 {size / 1e6:.0f} MB，续传", flush=True)
+        if size >= total:
+            break
+        if size == last_size:  # 连续两轮零进展 = 对端不给了，别空转
+            raise IOError(f"下载停滞在 {size}/{total} 字节（第 {attempt} 轮无进展）")
+        last_size = size
+    else:
+        raise IOError(f"下载未完成: {last_size}/{total} 字节，已重试 {_MAX_ATTEMPT} 轮")
+
+    if total and tmp.stat().st_size != total:
+        raise IOError(f"下载不完整: {tmp.stat().st_size}/{total} 字节")
+    tmp.replace(dest)
     print(f"[bootstrap] 下载完成: {dest} ({dest.stat().st_size / 1e6:.0f} MB)")
     return dest
 
