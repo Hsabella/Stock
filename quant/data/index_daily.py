@@ -12,7 +12,7 @@ import time
 
 import pandas as pd
 
-from quant.data import warehouse
+from quant.data import net, warehouse
 
 DATASET = "index_daily"
 INDEXES = ["sh000300", "sh000852", "sh000906", "sh000688"]  # 沪深300 / 中证1000 / 中证800 / 科创50
@@ -20,11 +20,9 @@ THROTTLE_SEC = 0.4
 
 
 def build() -> int:
-    import socket
-
     import akshare as ak
 
-    socket.setdefaulttimeout(60)
+    net.install_requests_timeout()
     # 盘中跑会拿到当日未收盘的半根 bar，以收盘价身份入仓直到下次更新；收盘前丢弃当日行
     cutoff = pd.Timestamp.today().normalize()
     if pd.Timestamp.now() >= cutoff + pd.Timedelta(hours=15, minutes=30):

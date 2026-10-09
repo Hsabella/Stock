@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant.data import warehouse
+from quant.data import net, warehouse
 
 DATASET = "industry"
 SW2_CACHE = Path(__file__).resolve().parents[2] / "cache" / "sector_momentum" / "symbol_to_sw2.csv"
@@ -168,4 +168,5 @@ def load_map(as_of: pd.Timestamp | str | None = None) -> pd.Series:
 
 
 if __name__ == "__main__":
+    net.install_requests_timeout()
     sys.exit(build())

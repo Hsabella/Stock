@@ -31,7 +31,7 @@ from pathlib import Path
 import pandas as pd
 
 from quant.config import load_config
-from quant.data import warehouse
+from quant.data import net, warehouse
 from quant.data.universe import read_instruments
 
 THROTTLE_SEC = 0.4
@@ -196,9 +196,7 @@ def run(dataset: str, since: str, limit: int | None = None, refresh: bool = Fals
 
 
 def main() -> int:
-    import socket
-
-    socket.setdefaulttimeout(60)  # akshare 底层 requests 多不带 timeout，半死连接会挂住 cron
+    net.install_requests_timeout()  # akshare 底层 requests 不带 timeout，半死连接会永久挂住
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, choices=sorted(FETCHERS))
     parser.add_argument("--since", default="2018-01-01")
