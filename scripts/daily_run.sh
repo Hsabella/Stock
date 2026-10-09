@@ -15,9 +15,15 @@ LOG="$LOG_DIR/daily_${TS}.log"
 
 cd "$REPO"
 . scripts/lib_no_proxy.sh   # 国内行情源绕过系统代理（新闻/资金流/日线全走这里）
+. scripts/lib_timeout.sh
+
+# 单步时限兜底：09-25 那轮 forward_check 卡在无超时的网络读 13 天，launchd 见上一轮
+# 未结束就一直不再起新的。正常耗时：引擎 ~20 分钟，forward ~5 分钟。
+STEP_LIMIT_SEC=$((60 * 60))
+limited() { run_limited "$STEP_LIMIT_SEC" "$@"; }
 {
     echo "=== daily_run started: $(date) ==="
-    "$PY" scripts/run_partial_engine.py
+    limited "$PY" scripts/run_partial_engine.py
     echo ""
     "$PY" scripts/generate_report.py 2>&1 || echo "  (generate_report 失败 / 不存在, 跳过)"
     echo ""
@@ -26,7 +32,7 @@ cd "$REPO"
     PREV=$(ls -1 "$REPO"/results/decisions/partial_*.json 2>/dev/null | tail -2 | head -1 \
            | sed -E 's/.*partial_([0-9]{8})\.json/\1/')
     if [ -n "$PREV" ]; then
-        "$PY" scripts/forward_check.py --decision "$PREV" --horizons 1 3 5 --refresh \
+        limited "$PY" scripts/forward_check.py --decision "$PREV" --horizons 1 3 5 --refresh \
             || echo "  (forward exit=$? 通常为数据未到, 明天再跑)"
     else
         echo "  尚无历史决策, 跳过"

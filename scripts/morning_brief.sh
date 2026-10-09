@@ -7,13 +7,29 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 . scripts/lib_no_proxy.sh   # 国内行情源绕过系统代理（K线/指数缓存刷新走这里）
+. scripts/lib_timeout.sh
 
 mkdir -p logs results/brief
-{
-  echo "===== $(date '+%F %T') ====="
-  .venv-quant/bin/python -m quant.live.daily_brief --out-dir results/brief
-} >> logs/brief.log 2>&1
-rc=$?
+
+# 失败重试：launchd 常在 DarkWake（合盖电池下几秒的后台唤醒）里触发本任务，
+# 此时网络/代理 DNS 还没起来 → NameResolutionError。09-28~10-08 连续 7 天
+# 都是 09:00 DarkWake 6 秒内跑挂、09:05 真唤醒后已无人重跑。
+# sleep 在机器再次睡眠时一起暂停，醒来后继续，所以间隔按"清醒时间"算。
+MAX_TRIES=4
+RETRY_GAP_SEC=300
+# 单次时限兜底（正常 ~30s）：挂死的进程会让 launchd 之后每天都跳过本任务
+RUN_LIMIT_SEC=900
+
+for try in $(seq 1 $MAX_TRIES); do
+  {
+    echo "===== $(date '+%F %T') (第 $try/$MAX_TRIES 次) ====="
+    run_limited "$RUN_LIMIT_SEC" .venv-quant/bin/python -m quant.live.daily_brief --out-dir results/brief
+  } >> logs/brief.log 2>&1
+  rc=$?
+  [ $rc -eq 124 ] && echo "!!! 超过 $((RUN_LIMIT_SEC / 60)) 分钟被终止" >> logs/brief.log
+  [ $rc -eq 0 ] && break
+  [ "$try" -lt $MAX_TRIES ] && sleep $RETRY_GAP_SEC
+done
 
 tail -n 500 logs/brief.log > logs/brief.log.tmp && mv logs/brief.log.tmp logs/brief.log
 

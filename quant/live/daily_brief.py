@@ -20,6 +20,7 @@ import pandas as pd
 
 from quant.backtest.timing import debounce, raw_ma_off, raw_risk_off
 from quant.config import load_config
+from quant.data import net
 
 
 def fetch_index(symbol: str) -> pd.Series:
@@ -473,6 +474,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, default=None)
     args = parser.parse_args()
+    net.install_requests_timeout()  # 半死连接会让进程永久挂住，launchd 随后每天都跳过本任务
 
     try:
         b = brief()
