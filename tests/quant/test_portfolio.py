@@ -571,3 +571,32 @@ def test_load_kline_stale_fallback_merges_long_history(monkeypatch, tmp_path):
     assert df["date"].is_monotonic_increasing
     assert float(df["close"].iloc[-1]) == 2.0              # 重叠段以新数据为准
     assert (df["date"] < "2025-01-01").sum() == (old["date"] < "2025-01-01").sum()
+
+
+# 2026 国庆：09-30 之后下一个交易日是 10-08（中间 5 个工作日休市）
+NATIONAL_DAY_CAL = pd.DatetimeIndex(
+    [d for d in pd.bdate_range("2026-05-01", "2026-12-31")
+     if not pd.Timestamp("2026-10-01") <= d <= pd.Timestamp("2026-10-07")])
+
+
+def _holiday_calendar(monkeypatch):
+    from quant.data import trade_calendar
+    monkeypatch.setattr(trade_calendar, "_fetch", lambda: NATIONAL_DAY_CAL)
+    trade_calendar.trading_days.cache_clear()
+
+
+def test_lag_across_national_day_is_one(monkeypatch):
+    """节后首日缓存停在节前收盘 = 数据齐，不能因为假期里的工作日判成陈旧去现拉。"""
+    _holiday_calendar(monkeypatch)
+    df = pd.DataFrame({"date": pd.to_datetime(["2026-09-29", "2026-09-30"])})
+    assert portfolio._lag(df, pd.Timestamp("2026-10-08")) == 1
+
+
+def test_reentry_cooldown_skips_holiday(tmp_path, monkeypatch):
+    """冷静期按交易日数：09-29 卖出、10-08 时只过了 2 个交易日（旧工作日口径会虚报 7）。"""
+    _holiday_calendar(monkeypatch)
+    k = _kline(n=40, close_start=100.0, step=+0.5, spread=1.0)
+    _setup_reentry(tmp_path, monkeypatch, k)
+    w = portfolio.reentry_watch(cfg=_reentry_cfg("2026-09-29"), today=pd.Timestamp("2026-10-08"),
+                                lights=LIGHTS_GREEN)
+    assert w["rows"][0]["cooldown_elapsed"] == 2

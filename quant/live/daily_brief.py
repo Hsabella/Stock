@@ -20,7 +20,7 @@ import pandas as pd
 
 from quant.backtest.timing import debounce, raw_ma_off, raw_risk_off
 from quant.config import load_config
-from quant.data import net
+from quant.data import net, trade_calendar
 
 
 def fetch_index(symbol: str) -> pd.Series:
@@ -76,7 +76,8 @@ def lights_status(today: pd.Timestamp) -> list[dict]:
 def brief(today: pd.Timestamp | None = None) -> dict:
     cfg = load_config("backtest")["timing"]
     hs300, spx = fetch_live_series()
-    today = today or (hs300.index[-1] + pd.offsets.BDay(1))  # 数据最新日的下一交易日=今天
+    # 数据最新日的下一交易日=今天。必须按交易所日历：BDay 不认节假日，09-30 收盘会推出 10-01
+    today = today or trade_calendar.next_trading_day(hs300.index[-1])
 
     calendar = pd.DatetimeIndex([*hs300.index[hs300.index >= "2019-01-01"], today]).unique().sort_values()
     df = raw_risk_off(hs300, spx, cfg["ma_days"], cfg["spx_threshold"], calendar)
@@ -492,6 +493,8 @@ def main() -> int:
             text += f"\n⚠️ 数据体检: {issue}"
     except Exception as e:
         text += f"\n⚠️ 数据体检自身失败: {type(e).__name__}: {e}"
+    if trade_calendar.degraded():
+        text += "\n⚠️ 交易日历获取失败，日期按工作日近似：节假日前后的日期标签/陈旧判定/冷静期可能偏差"
     text += f"\n（生成于 {pd.Timestamp.now():%Y-%m-%d %H:%M}）"
 
     print(text)
