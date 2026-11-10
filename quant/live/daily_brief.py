@@ -141,8 +141,12 @@ def brief(today: pd.Timestamp | None = None) -> dict:
     return out
 
 
+def _light(b: dict, symbol: str) -> dict | None:
+    return next((lt for lt in b.get("lights") or [] if lt["symbol"] == symbol), None)
+
+
 def _csi1000_light(b: dict) -> dict | None:
-    return next((lt for lt in b.get("lights") or [] if lt["symbol"] == "sh000852"), None)
+    return _light(b, "sh000852")
 
 
 def _format_lights(b: dict) -> list[str]:
@@ -285,6 +289,61 @@ def _format_etf_watch(b: dict) -> list[str]:
     return lines
 
 
+LAMP_POSITION_PCT = 0.05  # 信号仓=半仓，单票 ≤ 总资产 5%（stock_lights_report.md 定案）
+
+
+def _is_star_board(symbol: str) -> bool:
+    return symbol.startswith(("688", "689"))
+
+
+def _entry_note(signal_date: str, today: str) -> str:
+    """回测入场 = 信号日次一交易日开盘。FIRE_WINDOW 让旧信号多挂 2 天防漏看，
+    但不标日期时 11-06 的信号在 11-10 晨报里读起来像"今天可买"（2026-11-10 实盘踩过）。"""
+    entry = trade_calendar.next_trading_day(pd.Timestamp(signal_date))
+    t = pd.Timestamp(today)
+    if entry == t:
+        return "今日开盘入场"
+    return f"入场日{entry:%m-%d}已过" if entry < t else ""
+
+
+def _lot_note(r: dict, total: float | None, kc50_red: bool) -> str:
+    """最小一手买不进预算就标出来：科创板最小 200 股，高价股一手就超 5%；
+    科创50🔴 时结构灯要求科创新增仓位减半（"题材"无可执行定义，只落到 688/689）。"""
+    if not total:
+        return ""
+    star = _is_star_board(r["symbol"])
+    lot = 200 if star else 100
+    budget = total * LAMP_POSITION_PCT * (0.5 if star and kc50_red else 1.0)
+    cost = lot * r["close"]
+    if cost <= budget:
+        return ""
+    halved = "·科创50🔴减半" if star and kc50_red else ""
+    return f" ⚠️最小{lot}股≈{cost:,.0f} 超预算{budget:,.0f}{halved}"
+
+
+def _lamp_window_line(b: dict) -> str:
+    rule = "（单票半仓≤5% · 止损=入场价-3×ATR14 · 并发新仓≤3只）"
+    s = b.get("structure") or {}
+    if "stock_count" not in s:
+        return "  窗口: 中证1000 🔴 恐慌期=左侧超额最大 → 可按纪律执行" + rule
+    used, cap = s["stock_count"], s["target"]["max_count"]
+    if used >= cap:
+        return (f"  窗口: 中证1000 🔴 恐慌期=左侧超额最大，但卫星已满 {used}/{cap}"
+                " → 今日不可新开仓（先按纪律腾出名额）")
+    return (f"  窗口: 中证1000 🔴 恐慌期=左侧超额最大 → 可按纪律执行，"
+            f"卫星剩 {cap - used} 个名额" + rule)
+
+
+def _lamp_state_note(r: dict, broken: dict) -> str:
+    if r["state"] == "EXITED":
+        return "（EXITED，接回归回补观察）"
+    if r["state"] != "HELD":
+        return ""
+    if broken.get(r["symbol"]):
+        return "（持仓中·止损已破❗以止损为准，不补仓）"
+    return "（持仓中·非补仓依据）"
+
+
 def _format_stock_lamps(b: dict) -> list[str]:
     if "stock_lamps_error" in b:
         return ["", f"⚠️ 个股抄底灯生成失败: {b['stock_lamps_error']}"]
@@ -293,8 +352,9 @@ def _format_stock_lamps(b: dict) -> list[str]:
         return []
     rows = [r for r in sl["rows"] if not r.get("error")]
     errors = len(sl["rows"]) - len(rows)
-    # 持仓票不列入：灯只管新钱入场，防止被误读成补仓依据
-    fired = [r for r in rows if r["lamp"] == "fire" and r["state"] != "HELD"]
+    # 持仓票也列出（2026-11-10 用户要求），但逐行标"非补仓依据"——LIGHTS.md 红线：
+    # 持仓票触发信号 ≠ 补仓理由、不摊平；止损已破的再标"以止损为准"，防两条信号打架
+    fired = [r for r in rows if r["lamp"] == "fire"]
     zone = sum(1 for r in rows if r["lamp"] == "watch")
     head = (f"【个股抄底灯】setup=距120日高≤{sl['thr']:.0%} · 左侧L6/L1"
             f"（回测定案: docs/quant/stock_lights_report.md）")
@@ -305,18 +365,25 @@ def _format_stock_lamps(b: dict) -> list[str]:
     if c1k is None:
         lines.append("  窗口: ⚠️ 中证1000灯缺失——触发仅记录")
     elif c1k["state"] == "risk_off":
-        lines.append("  窗口: 中证1000 🔴 恐慌期=左侧超额最大 → 可按纪律执行"
-                     "（单票半仓≤5% · 止损=入场价-3×ATR14 · 并发新仓≤3只）")
+        lines.append(_lamp_window_line(b))
     else:
         lines.append("  窗口: 中证1000 🟢 —— 绿灯期独跌票无超额，以下触发仅记录、不建议入场")
+    total = (b.get("structure") or {}).get("total")
+    kc50 = _light(b, "sh000688")
+    kc50_red = bool(kc50 and kc50["state"] == "risk_off")
+    broken = {h["symbol"]: h.get("broken")
+              for h in (b.get("holdings") or {}).get("rows", []) if not h.get("error")}
     for r in fired:
-        note = "（EXITED，接回归回补观察）" if r["state"] == "EXITED" else ""
-        names = "+".join(s["signal"] for s in r["signals"])
+        note = _lamp_state_note(r, broken)
+        names = "+".join(f"{s['signal']}(信号{s['signal_date'][5:]}"
+                         + (f"·{n}" if (n := _entry_note(s['signal_date'], b['date'])) else "") + ")"
+                         for s in r["signals"])
+        lot = _lot_note(r, total, kc50_red) if r["state"] not in ("EXITED", "HELD") else ""
         lines.append(f"  🟢 {r['name']} {r['symbol']} {names} "
-                     f"收盘{r['close']:.2f} 距高{r['dd120']:+.0%} RSI{r['rsi']:.0f}{note}")
+                     f"收盘{r['close']:.2f} 距高{r['dd120']:+.0%} RSI{r['rsi']:.0f}{note}{lot}")
     if not fired:
         lines.append("  今日无触发")
-    tail = f"  （🟡底部区观察 {zone} 只；持仓票不列入——灯只管新钱，不是补仓依据）"
+    tail = f"  （🟡底部区观察 {zone} 只；灯只管新钱，持仓票触发不是补仓依据）"
     if errors:
         tail += f" ⚠️ {errors}只K线不足"
     lines.append(tail)

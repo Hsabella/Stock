@@ -263,7 +263,7 @@ def test_format_stock_lamps_red_window_lists_fires_excludes_held():
     assert "【个股抄底灯】" in text and "≤-35%" in text
     assert "恐慌期=左侧超额最大" in text and "止损=入场价-3×ATR14" in text
     assert "🟢 国轩高科 002074 L6超卖修复" in text
-    assert "雪人集团" not in text                      # HELD 触发不列入（防误读为补仓）
+    assert "雪人集团 002639" in text and "持仓中·非补仓依据" in text  # HELD 列出但标非补仓
     assert "中国核建" in text and "接回归回补观察" in text
     assert "🟡底部区观察 1 只" in text
 
@@ -293,3 +293,68 @@ def test_stock_lamps_log_dedupes_by_signal_date_and_excludes_held(monkeypatch, t
     assert not any("002639" in ln for ln in log)      # HELD 不落流水
     assert log[1].startswith("2026-07-11,002074,L6超卖修复,")
     assert log[1].endswith(",risk_off,2026-07-13")
+
+
+# ---- 2026-11-10 晨报抄底灯三处误导：信号日不标 / 卫星满额仍"可执行" / 科创板最小手超预算 ----
+
+def _lamp_brief(rows, structure=None, kc50="risk_on", date="2026-11-10"):
+    lights = [_c1k("risk_off"), dict(FAKE_LIGHTS[1], state=kc50)]
+    b = dict(FAKE, date=date, lights=lights, stock_lamps={**FAKE_STOCK_LAMPS, "rows": rows})
+    if structure is not None:
+        b["structure"] = structure
+    return daily_brief.format_brief(b)
+
+
+def _fire(symbol, name, close, signal_date, signal="L1接刀"):
+    return {"symbol": symbol, "name": name, "state": "WATCHING", "stale": False, "lamp": "fire",
+            "signals": [{"signal": signal, "signal_date": signal_date}],
+            "close": close, "dd120": -0.5, "rsi": 30.0}
+
+
+def _struct(count, total=180_000.0):
+    return {"total": total, "stock_count": count, "compliant": True, "cash_pct": 0.36,
+            "etf_pct": 0.43, "etf_cost_fallback": [],
+            "target": {"core_etf_lo": 0.4, "core_etf_hi": 0.5, "max_count": 3, "max_pct": 0.1}}
+
+
+def test_lamp_shows_signal_date_and_marks_missed_entry():
+    # 11-10(周二)晨报：11-09 信号 → 今日开盘入场；11-06 信号 → 入场日 11-09 已过
+    text = _lamp_brief([_fire("002463", "沪电股份", 77.1, "2026-11-06"),
+                        _fire("600176", "中国巨石", 27.4, "2026-11-09")])
+    assert "信号11-06" in text and "入场日11-09已过" in text
+    assert "信号11-09" in text and "今日开盘入场" in text
+
+
+def test_lamp_window_blocks_new_entries_when_satellites_full():
+    text = _lamp_brief([_fire("600176", "中国巨石", 27.4, "2026-11-09")], structure=_struct(3))
+    assert "卫星已满 3/3" in text and "不可新开仓" in text
+    assert "可按纪律执行" not in text
+
+
+def test_lamp_window_shows_free_slots():
+    text = _lamp_brief([_fire("600176", "中国巨石", 27.4, "2026-11-09")], structure=_struct(2))
+    assert "可按纪律执行" in text and "卫星剩 1 个名额" in text
+
+
+def test_star_board_min_lot_over_budget_flagged_and_kc50_red_halves():
+    # 688 最小 200 股：62.81×200=12,562 > 18万×5%=9,000；科创50🔴再减半→4,500
+    text = _lamp_brief([_fire("688183", "生益电子", 62.81, "2026-11-09")],
+                       structure=_struct(2), kc50="risk_off")
+    assert "最小200股≈12,562" in text and "超预算4,500" in text and "科创50🔴减半" in text
+
+
+def test_main_board_lot_within_budget_not_flagged():
+    text = _lamp_brief([_fire("600176", "中国巨石", 27.4, "2026-11-09")], structure=_struct(2))
+    assert "超预算" not in text
+
+
+def test_held_lamp_with_broken_stop_says_stop_wins():
+    held = dict(_fire("601208", "东材科技", 34.4, "2026-11-09"), state="HELD")
+    b = dict(FAKE, date="2026-11-10", lights=[_c1k("risk_off")],
+             stock_lamps={**FAKE_STOCK_LAMPS, "rows": [held]},
+             structure=_struct(3, total=180_000.0),
+             holdings={"rows": [{"symbol": "601208", "broken": True}]})
+    text = daily_brief._format_stock_lamps(b)
+    joined = "\n".join(text)
+    assert "东材科技 601208" in joined and "止损已破❗以止损为准" in joined
+    assert "超预算" not in joined                      # 持仓票不算新仓预算
