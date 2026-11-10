@@ -204,6 +204,54 @@ def test_structure_drift_etf_building_in_progress():
     assert "缺口约 12,000 元" in s["actions"][0]
 
 
+def test_structure_drift_values_core_etf_at_market(monkeypatch):
+    """核心 ETF 按现价估值：10-20 实盘 159919 成本 4.874、现价 4.430，
+    按成本估值把总资产多算 7.9k，单票超限的减仓额从 2,320 算成 1,530。"""
+    k = _vkline([4.50, 4.43], spread=0.02)
+    monkeypatch.setattr(portfolio, "load_kline", lambda sym, today: (k, False))
+    health = {"rows": [_row("科创50ETF", 20794)]}
+    s = portfolio.structure_drift(
+        cfg=_cfg(cash=70012.92 + 6900 + 8178,
+                 etf=[{"symbol": "159919", "name": "沪深300ETF",
+                       "position": 17800, "entry_price": 4.874}]),
+        health=health, today=pd.Timestamp("2026-10-20"))
+    assert abs(s["etf_value"] - 17800 * 4.43) < 1e-6
+    assert abs(s["total"] - 184738.92) < 1e-6  # 截图 184,739.92 含 1 元未分项差
+    assert s["etf_cost_fallback"] == []
+    assert "至少减 2,320 元" in "\n".join(s["actions"])
+
+
+def test_structure_drift_core_etf_uses_sina_close_without_kline(monkeypatch):
+    """无 K 线缓存且东财现拉失败（2026-10-21 实况）：退到新浪不复权收盘——估值只要
+    最新一根，不复权与 qfq 在最新日相等；新浪只在历史段因拆分失真才禁用。"""
+    monkeypatch.setattr(portfolio, "load_kline",
+                        lambda sym, today: (pd.DataFrame(), True))
+    monkeypatch.setattr(portfolio, "_etf_last_close_sina", lambda sym, today: 4.411)
+    s = portfolio.structure_drift(
+        cfg=_cfg(cash=63000, etf=[{"symbol": "159919", "name": "沪深300ETF",
+                                   "position": 10000, "entry_price": 4.874}]),
+        health={"rows": []}, today=pd.Timestamp("2026-10-21"))
+    assert abs(s["etf_value"] - 44110) < 1e-6
+    assert s["etf_cost_fallback"] == []
+
+
+def test_structure_drift_core_etf_falls_back_to_cost_without_kline(monkeypatch):
+    """K 线与新浪都取不到才退回成本估值，并点名留痕（由晨报标 ⚠️），不静默。"""
+    monkeypatch.setattr(portfolio, "load_kline",
+                        lambda sym, today: (pd.DataFrame(), True))
+
+    def sina_down(sym, today):
+        raise ConnectionError("新浪也挂了")
+
+    monkeypatch.setattr(portfolio, "_etf_last_close_sina", sina_down)
+    s = portfolio.structure_drift(
+        cfg=_cfg(cash=63000, etf=[{"symbol": "159919", "name": "沪深300ETF",
+                                   "position": 30000, "entry_price": 3.0}]),
+        health={"rows": []}, today=pd.Timestamp("2026-10-20"))
+    assert abs(s["etf_value"] - 90000) < 1e-6
+    assert s["etf_cost_fallback"] == ["沪深300ETF"]
+
+
 def test_load_config_exited_requires_exit_date(tmp_path):
     p = tmp_path / "w.yaml"
     p.write_text(

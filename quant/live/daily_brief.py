@@ -117,7 +117,7 @@ def brief(today: pd.Timestamp | None = None) -> dict:
     try:
         from quant.live.portfolio import structure_drift
 
-        out["structure"] = structure_drift(health=out.get("holdings"))
+        out["structure"] = structure_drift(health=out.get("holdings"), today=today)
     except Exception as e:
         out["structure_error"] = f"{type(e).__name__}: {e}"
     try:
@@ -211,9 +211,11 @@ def _format_structure(b: dict) -> list[str]:
     if s.get("error"):
         return ["", f"⚠️ 结构修正跟踪: {s['error']}"]
     t = s["target"]
+    fallback = s.get("etf_cost_fallback") or []
+    warn = [f"  ⚠️ {'·'.join(fallback)} 取不到K线，按成本估值（占比可能失真）"] if fallback else []
     if s["compliant"]:
         return ["", f"【结构修正跟踪】✅ 已达标（核心ETF {s['etf_pct']:.0%} · "
-                    f"卫星 {s['stock_count']} 只 · 现金 {s['cash_pct']:.0%}）"]
+                    f"卫星 {s['stock_count']} 只 · 现金 {s['cash_pct']:.0%}）", *warn]
     lines = [
         "",
         f"【结构修正跟踪】目标: 核心ETF {t['core_etf_lo']:.0%}-{t['core_etf_hi']:.0%}"
@@ -223,7 +225,7 @@ def _format_structure(b: dict) -> list[str]:
         f" + 核心ETF {s['etf_pct']:.0%}",
     ]
     lines += [f"  待执行{i}: {a}" for i, a in enumerate(s["actions"], 1)]
-    return lines
+    return lines + warn
 
 
 def _mark(ok: bool | None) -> str:
