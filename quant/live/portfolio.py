@@ -292,13 +292,56 @@ def latest_engine_signals() -> tuple[dict, str]:
     return out, date
 
 
-def structure_drift(cfg: dict | None = None, health: dict | None = None) -> dict:
+def _etf_last_close_sina(symbol: str, today: pd.Timestamp) -> float:
+    """新浪 ETF 日线的最新已收盘价。不复权——只用于取最新一根（与 qfq 在最新日相等），
+    历史段会被份额拆分搞错，别拿去算 MA/ATR（那条禁令见 _fetch_etf_kline）。"""
+    import akshare as ak
+
+    prefix = "sh" if symbol.startswith(("5", "6")) else "sz"
+    df = ak.fund_etf_hist_sina(symbol=f"{prefix}{symbol}")
+    df = df[pd.to_datetime(df["date"]) < today]  # 盘中跑时丢掉当日未收线的 bar
+    if df.empty:
+        raise ValueError(f"{symbol} 新浪返回空")
+    return float(df["close"].iloc[-1])
+
+
+def _core_etf_value(etfs: list[dict], today: pd.Timestamp) -> tuple[float, list[str]]:
+    """核心宽基 ETF 市值 = Σ 持仓 × 最新收盘。取价顺序：K 线缓存/东财现拉 → 新浪最新收盘
+    → 成本价；落到成本价的返回其名单（调用方标 ⚠️）。核心宽基不在任何扫描名单里，
+    通常没有 K 线缓存，东财又常被封（2026-10-21 实况），新浪这一层是常走路径。
+
+    曾经一律按成本估——注释称"宽基波动对结构带宽影响可忽略"，实盘证伪：2026-10-20
+    159919 成本 4.874、现价 4.430（-9%），17800 股多算 7.9k，总资产 18.5万 报成 19.3万，
+    科创50ETF 超限减仓额从 2,320 少报成 1,530，核心占比 42.7% 报成 45%。
+    """
+    value, fallback = 0.0, []
+    for e in etfs:
+        price = float(e["entry_price"])
+        sym = str(e.get("symbol", "")).zfill(6) if e.get("symbol") else ""
+        kline = load_kline(sym, today)[0] if sym else pd.DataFrame()
+        if not kline.empty:
+            price = float(kline["close"].iloc[-1])
+        else:
+            try:
+                if not sym:
+                    raise ValueError("缺 symbol")
+                price = _etf_last_close_sina(sym, today)
+            except Exception as ex:
+                print(f"  [etf] {sym or e.get('name')} 取价失败，按成本估值: {type(ex).__name__}: {ex}")
+                fallback.append(e.get("name") or sym or "?")
+        value += float(e["position"]) * price
+    return value, fallback
+
+
+def structure_drift(cfg: dict | None = None, health: dict | None = None,
+                    today: pd.Timestamp | None = None) -> dict:
     """晨报【结构修正跟踪】数据：当前 vs 目标结构的偏离与待执行动作（规则生成）。
 
-    ETF 按成本估值（宽基波动对 10 个点的结构带宽影响可忽略，避免再引入行情依赖）。
+    卫星按 holdings_health 的现价市值，核心 ETF 按 _core_etf_value 的现价市值。
     """
     cfg = cfg or load_portfolio_config()
-    health = health or holdings_health(cfg)
+    today = today or pd.Timestamp.today().normalize()
+    health = health or holdings_health(cfg, today)
     target = cfg["target_structure"]
     lo, hi = target.get("core_etf_pct", [0.40, 0.50])
     max_count = int(target.get("satellite_max_count", 3))
@@ -306,8 +349,7 @@ def structure_drift(cfg: dict | None = None, health: dict | None = None) -> dict
 
     rows = [r for r in health["rows"] if not r.get("error")]
     stock_value = sum(r["value"] for r in rows)
-    etf_value = sum(float(e["position"]) * float(e["entry_price"])
-                    for e in cfg["account"].get("etf", []))
+    etf_value, etf_cost_fallback = _core_etf_value(cfg["account"].get("etf", []), today)
     cash = float(cfg["account"].get("cash", 0))
     total = cash + stock_value + etf_value
     if total <= 0:
@@ -342,6 +384,7 @@ def structure_drift(cfg: dict | None = None, health: dict | None = None) -> dict
         "total": total, "cash": cash, "cash_pct": cash / total,
         "stock_value": stock_value, "stock_pct": stock_pct,
         "etf_value": etf_value, "etf_pct": etf_pct,
+        "etf_cost_fallback": etf_cost_fallback,
         "stock_count": len(rows),
         "target": {"core_etf_lo": lo, "core_etf_hi": hi,
                    "max_count": max_count, "max_pct": max_pct},
