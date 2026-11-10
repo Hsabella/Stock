@@ -19,12 +19,14 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
+from quant.data import trade_calendar
+
 REPO = Path(__file__).resolve().parents[2]
 WATCHLIST = REPO / "watchlist.yaml"
 KLINE_DIR = REPO / "cache" / "kline"
 DEC_DIR = REPO / "results" / "decisions"
 STALE_TRADING_DAYS = 1  # 缓存末日落后上一交易日即算陈旧 → 现拉降级。
-#   个股原为 3：晨报 today = 指数末日+1BDay，所以落后 1 = 正常、落后 2 = 少一根 K 线，
+#   个股原为 3：晨报 today = 指数末日的下一交易日，所以落后 1 = 正常、落后 2 = 少一根 K 线，
 #   3 的容忍度会把"旧引擎漏跑一晚"整个吞掉——2026-09-02 实盘踩过：daily_run 09-01 没跑，
 #   晨报拿 08-31 收盘当"现价"且不标 ⚠️，止损距离虚报 +8.6%（实际 +5.1%）。
 MIN_CACHE_ROWS = 140  # 回写下限：抄底灯 dd120+信号窗要 140 根，低于此数的应答一律当残缺
@@ -115,9 +117,9 @@ def _fetch_etf_kline(symbol: str, start: str, end: str) -> pd.DataFrame:
 
 
 def _lag(df: pd.DataFrame, today: pd.Timestamp) -> int:
-    """缓存末日距 today 的交易日数（工作日近似）。晨报的 today = 指数末日+1BDay，
-    所以"数据齐"时恒为 1；节假日不会虚增，因为 today 本身就是从指数日历推出来的。"""
-    return len(pd.bdate_range(df["date"].iloc[-1], today)) - 1
+    """缓存末日距 today 的交易日数（交易所日历）。晨报的 today = 指数末日的下一交易日，
+    所以"数据齐"时恒为 1，长假后首日缓存停在节前收盘也是 1。"""
+    return trade_calendar.trading_days_between(df["date"].iloc[-1], today)
 
 
 def load_kline(symbol: str, today: pd.Timestamp) -> tuple[pd.DataFrame, bool]:
@@ -376,7 +378,7 @@ def reentry_watch(cfg: dict | None = None, today: pd.Timestamp | None = None,
             rows.append({**base, "error": "无K线数据"})
             continue
         any_stale |= stale
-        elapsed = max(0, len(pd.bdate_range(pd.Timestamp(it["exit_date"]), today)) - 1)
+        elapsed = trade_calendar.trading_days_between(pd.Timestamp(it["exit_date"]), today)
         last = float(kline["close"].astype(float).iloc[-1])
         trail = trail_line(kline, cfg["atr_k"])
         light = light_by_symbol.get(
