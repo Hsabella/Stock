@@ -39,7 +39,7 @@
 0  9             * * 1-5  morning_brief.sh      # 晨间仓位红绿灯 → results/brief/latest.md (每天唯一必看)
 0 10,11,13,14,15 * * 1-5  fetch_news_only.py    # 盘中每小时累积新闻样本
 30 18            * * 1-5  daily_run.sh          # 盘后 18:30 跑决策 + forward 对照 (此时新闻/资金流数据已稳定)
-30 19            * * 5    weekly_data.sh        # 周五收盘后: 东财资金流累积 + qlib 数据包更新 + 质检
+30 19            * * 5    weekly_data.sh        # 周五收盘后: 财报/指数/行业 + qlib 数据包更新 + 质检
 ```
 
 早上开盘前看 `results/brief/latest.md`（🟢/🔴 仓位红绿灯）；旧引擎的

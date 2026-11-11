@@ -1,4 +1,4 @@
-"""本地 parquet 数仓：qlib bin 之外的扩展数据（换手率/估值/资金流）统一落这里。
+"""本地 parquet 数仓：qlib bin 之外的扩展数据（换手率/估值/财报）统一落这里。
 
 存储约定：每个 dataset 一个 parquet，长表格式，列含 instrument / datetime + 数据列。
 append 语义：新数据与旧数据按 (instrument, datetime) 去重，保留最新一次写入；

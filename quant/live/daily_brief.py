@@ -487,10 +487,6 @@ def append_stock_lamps_log(path: Path, b: dict) -> None:
 
 #: qlib 日线包允许落后的自然日数（周更 + 长假，14 天内不报）
 QLIB_STALE_DAYS = 14
-#: 东财资金流仓库覆盖率下限（占全池比例），低于此判定为"没攒起来"。
-#: 分母是 csi_union 全历史去重代码数(~3387)，而 fetcher 只拉 since 之后仍在池的(~2949)，
-#: 所以一次完美抓取约 87%——阈值别往上调，否则天天误报。
-FUNDFLOW_MIN_COVERAGE = 0.80
 
 
 def data_health(today: pd.Timestamp | None = None) -> list[str]:
@@ -512,31 +508,7 @@ def data_health(today: pd.Timestamp | None = None) -> list[str]:
         lag = (today - last).days
         if lag > QLIB_STALE_DAYS:
             issues.append(f"qlib 日线止于 {last:%Y-%m-%d}（落后 {lag} 天）→ 跑 quant.data.bootstrap")
-
-    ff = Path(cfg["warehouse"]["path"]).expanduser() / "em_fundflow.parquet"
-    if not ff.exists():
-        issues.append("东财资金流仓库为空 → 跑 akshare_fetcher --dataset em_fundflow --refresh")
-    else:
-        try:
-            # 用 pyarrow 只读一列：instrument 在 parquet 里是索引层，read_parquet
-            # 带 columns= 会因还原索引而 KeyError
-            import pyarrow.parquet as pq
-
-            n = pq.read_table(ff, columns=["instrument"])["instrument"].to_pandas().nunique()
-        except Exception as e:  # 仓库损坏也要报出来，不能静默当健康
-            issues.append(f"东财资金流仓库读取失败: {type(e).__name__}: {e}")
-        else:
-            # 全池 = qlib instruments 里的 csi_union（每只可能多行区间，去重取代码列）
-            inst = (Path(cfg["qlib"]["provider_uri"]).expanduser() / "instruments"
-                    / f"{cfg['universe']['output_name']}.txt")
-            total = 0
-            if inst.exists():
-                total = len({ln.split("\t")[0] for ln in inst.read_text().splitlines() if ln.strip()})
-            if total and n < total * FUNDFLOW_MIN_COVERAGE:
-                issues.append(
-                    f"东财资金流仅覆盖 {n}/{total} 只（<{FUNDFLOW_MIN_COVERAGE:.0%}）"
-                    "→ 跑 akshare_fetcher --dataset em_fundflow --refresh"
-                )
+    # 东财资金流覆盖率检查已随 em_fundflow 一起于 2026-11-11 废弃（docs/quant/fundflow_ic_preview.md）
     return issues
 
 

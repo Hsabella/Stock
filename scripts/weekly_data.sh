@@ -1,6 +1,6 @@
 #!/bin/bash
 # quant 每周数据维护 · cron 入口（每周五 19:30）
-# ① 东财资金流累积（仅存 120 天，必须每周攒） ①b 财报增量 ①c 指数日线 ①d 行业快照
+# ① 财报增量 ①b 指数日线 ①c 行业快照（东财资金流累积 2026-11-11 废弃，见 docs/quant/fundflow_ic_preview.md）
 # ② qlib 数据包更新 ③ 数据质检
 # 失败不静默：任一步骤非零 → 写 results/brief/data_health_alert.txt（晨报每日拼入，
 # 直到下次成功才清除）+ macOS 通知 + 整体 exit 非零。不用 set -e：单步失败不阻断后续。
@@ -59,14 +59,13 @@ log_sink() {
 rm -f "$STATUS"
 {
   echo "===== $(date '+%F %T') ====="
-  step "em_fundflow" $FETCH_LIMIT $PY -m quant.data.akshare_fetcher --dataset em_fundflow --refresh
   step "financials"  $FETCH_LIMIT $PY -m quant.data.akshare_fetcher --dataset financials --refresh
   step "index_daily" $QUICK_LIMIT $PY -m quant.data.index_daily
   step "industry"    $QUICK_LIMIT $PY -m quant.data.industry
   step "bootstrap"   $FETCH_LIMIT $PY -m quant.data.bootstrap --force-download
   # 必须紧跟 bootstrap：extract 会把整个 cn_data 目录替换掉，
   # csi_union.txt 是我们自己生成的、不在 release 包里，不重建就没了
-  # （em_fundflow / ext_features / daily_brief 体检都读它）
+  # （ext_features / daily_brief 都读它）
   step "universe"    $QUICK_LIMIT $PY -m quant.data.universe
   step "checks"      $QUICK_LIMIT $PY -m quant.data.checks
   if [ -n "${FAILED}" ]; then
@@ -82,7 +81,7 @@ rm -f "$STATUS"
 tail -n 1000 logs/weekly_data.log > logs/weekly_data.log.tmp && mv logs/weekly_data.log.tmp logs/weekly_data.log
 
 if [ -n "${FAILED}" ]; then
-  echo "$(date '+%F') 周五数据维护失败步骤:${FAILED}（东财资金流断档不可补，尽快手动重跑）" > results/brief/data_health_alert.txt
+  echo "$(date '+%F') 周五数据维护失败步骤:${FAILED}（尽快手动重跑，见 logs/weekly_data.log）" > results/brief/data_health_alert.txt
   osascript -e "display notification \"失败:${FAILED} — 见 logs/weekly_data.log\" with title \"⚠️ 周五数据维护\"" 2>/dev/null
   exit 1
 fi

@@ -25,8 +25,6 @@ A 股自选股决策引擎：收盘后从 8 个维度给 watchlist 打分 + 状�
 .venv-quant/bin/python -m quant.data.bootstrap        # 更新 qlib 数据包(chenditc, 日更)
 .venv-quant/bin/python -m quant.data.universe          # 重建 PIT 股票池 csi_union(~1800只)
 .venv-quant/bin/python -m quant.data.checks            # 数据质检(每次更新必跑)
-.venv-quant/bin/python -m quant.data.akshare_fetcher --dataset em_fundflow --refresh  # 资金流滚动累积
-                                                      # (每周; --refresh 清断点, 周期性增量必加)
 .venv-quant/bin/python -m quant.data.akshare_fetcher --dataset financials --refresh   # 财报摘要(PIT)
 .venv-quant/bin/python -m quant.data.industry          # 行业标签快照(申万缓存+新浪补缺)
 .venv-quant/bin/python -m quant.data.index_daily       # 指数日线(300/1000/800)落仓
@@ -46,12 +44,12 @@ NO-GO**：主线（+roe_delta 财报因子、限池中证800、embargo 修正）
 夏普 0.79、MDD 减半，但 IR/分年稳定性/成本翻倍未过线（alpha 绑定中小盘行情，25/26
 反向）；中性化和 regime 特征两个假设被实测证伪（过程与数据见
 [docs/quant/iteration_plan_v2.md](./docs/quant/iteration_plan_v2.md) 各 Step 实测小节 +
-[docs/quant/v2_report.md](./docs/quant/v2_report.md)）。**选股封存观察，项目收敛为
+[docs/quant/v2_report.md](./docs/quant/v2_report.md)）。**东财资金流(em_fundflow)2026-11-11 废弃并删数据**——38 周 IC 预览显示
+信息全被当日涨跌解释（残差 IC≈0，[docs/quant/fundflow_ic_preview.md](./docs/quant/fundflow_ic_preview.md)），别再攒。**选股封存观察，项目收敛为
 "指数 ETF + 择时红绿灯 + 排雷器"**；红绿灯信号每日落 `results/brief/signal_log.csv` 攒实盘对账。
 用户日常只看 `results/brief/latest.md`（晨间红绿灯）；旧引擎 BUY 名单已证伪勿采信，仅风险预警可用。
-数据在 `~/.qlib/`（bin 包 + quant_warehouse parquet），不进 git；**东财资金流仅 120 天
-历史，需每周跑 fetcher 累积**（周五 19:30 `scripts/weekly_data.sh`：
-fetcher+bootstrap+**universe**+checks，连同工作日 09:00 `scripts/morning_brief.sh`
+数据在 `~/.qlib/`（bin 包 + quant_warehouse parquet），不进 git；周维护是周五 19:30 `scripts/weekly_data.sh`
+（financials/index_daily/industry+bootstrap+**universe**+checks，连同工作日 09:00 `scripts/morning_brief.sh`
 与 18:30 `scripts/daily_run.sh`）；macOS 下 qlib 大面板调用必须有 `__main__` 保护。
 **这三个定时任务 2026-09-02 从 cron 迁到 launchd**（`./scripts/install_schedule.sh`
 安装，plist 模板在 `scripts/launchd/`，`--uninstall` 卸下）：macOS 的 cron 在机器睡眠时
@@ -60,9 +58,9 @@ fetcher+bootstrap+**universe**+checks，连同工作日 09:00 `scripts/morning_b
 StartCalendarInterval 会在唤醒后补跑错过的那次。改调度时间改 plist 后重跑安装脚本，
 别再往 crontab 里加。
 **`bootstrap` 之后必须紧跟 `universe`**：extract 是整目录替换 cn_data，而 `csi_union.txt`
-是我们自己生成、不在 release 包里的，不重建就没了（em_fundflow / ext_features /
-晨报数据体检都读它）。数据健康度由 `daily_brief.data_health()` 直接查落盘状态
-（qlib 日历落后 >14 天、资金流覆盖率 <80% 即报），不再依赖那个删掉就消音的
+是我们自己生成、不在 release 包里的，不重建就没了（ext_features /
+晨报都读它）。数据健康度由 `daily_brief.data_health()` 直接查落盘状态
+（qlib 日历落后 >14 天即报），不再依赖那个删掉就消音的
 `data_health_alert.txt`。
 
 ## 常用命令
