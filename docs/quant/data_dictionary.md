@@ -36,7 +36,7 @@ csi_union 活跃成分 1726→1798 只；csi300 历史调出 639 只（PIT 真�
 |---|---|---|---|
 | sina_daily | 新浪日线 | 2793 只 × 2018-今 | turnover/流通股本；156 只失败为已退市股（新浪停服），其 ext 特征缺失由 Fillna 兜底 |
 | baidu_valuation | 百度估值 | 2946 只 × 2018-今 | PE-TTM/PB 稀疏采样点，使用时 ffill ≤63 交易日 |
-| em_fundflow | 东财个股资金流 | **仅最近 ~120 天** | 无法回测！只做滚动累积（每周跑一次 fetcher append），攒够历史后资金流因子进二批 |
+| ~~em_fundflow~~ | 东财个股资金流 | **2026-11-11 废弃，数据已删** | 38 周 IC 预览：信息全被当日涨跌解释（残差 IC +0.003），见 fundflow_ic_preview.md |
 | ext_features | 由上述加工 | 2793 只 | turn_20/turn_ratio_5_120/size/ep/bp，对齐 qlib 日历 |
 
 ## 已知局限（有意接受，勿当 bug）

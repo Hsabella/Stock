@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- quant 周维护（资金流/qlib包/股票池/质检），周五 19:30
+<!-- quant 周维护（财报/指数/行业/qlib包/股票池/质检），周五 19:30
      由 scripts/install_schedule.sh 渲染 @REPO@ 后装到 ~/Library/LaunchAgents/。
      选 launchd 而非 cron：机器睡过了点，launchd 会在唤醒后补跑，cron 直接丢。 -->
 <plist version="1.0">

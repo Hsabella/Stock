@@ -124,7 +124,7 @@
 |---|---|---|
 | 工作日 09:00 | `scripts/morning_brief.sh` | `results/brief/latest.md` + 三份信号流水 |
 | 每日 18:30 | 旧引擎 `daily_run.sh` | 排雷信号 + `cache/kline/` K线缓存（晨报的数据源！别停） |
-| 周五 19:30 | `scripts/weekly_data.sh` | qlib 数据包 + 资金流 + 质检 |
+| 周五 19:30 | `scripts/weekly_data.sh` | qlib 数据包 + 财报/指数/行业 + 质检 |
 
 三份信号流水（已进 git，是实盘对账的原始证据，**别删**）：
 - `results/brief/signal_log.csv` — 主灯逐日状态

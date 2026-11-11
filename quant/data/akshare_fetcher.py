@@ -1,10 +1,8 @@
 """akshare 扩展数据批量拉取：断点续拉 + 限流退避 + 失败清单。
 
-四个 dataset（拉取经验移植自 factors/*/data.py：东财限流 → 新浪/百度替代）：
+三个 dataset（拉取经验移植自 factors/*/data.py：东财限流 → 新浪/百度替代）：
 - sina_daily      新浪日线全历史 → turnover(换手率) / outstanding_share(流通股本)
 - baidu_valuation 百度估值全历史 → pe_ttm / pb（长周期为稀疏采样点，用时需 ffill）
-- em_fundflow     东财个股资金流，**只有最近 ~120 天**——无法回测，本 dataset 仅做
-                  滚动累积（每周跑一次 append 攒历史），资金流因子留待二批评估
 - financials      财务摘要(ROE/归母净利润, v2 Step2)。datetime = **报告期**（每股唯一，
                   年报与次年一季报的披露截止日相同，用披露日做行键会互相覆盖）；
                   PIT 由 ext_features 构建时经 pit_available_date(报告期→法定披露
@@ -14,12 +12,14 @@
 用法:
     python -m quant.data.akshare_fetcher --dataset sina_daily [--since 2018-01-01] [--limit 100]
     python -m quant.data.akshare_fetcher --dataset baidu_valuation
-    python -m quant.data.akshare_fetcher --dataset em_fundflow --refresh
     python -m quant.data.akshare_fetcher --dataset financials
 
 断点：warehouse 目录下 <dataset>.done.txt 记录已完成代码，重跑自动跳过（针对单次
-中断续拉）。周期性增量数据集（em_fundflow/financials）定期重跑时要加 --refresh
+中断续拉）。周期性增量数据集（financials）定期重跑时要加 --refresh
 清掉断点，否则全部代码被视作已完成而空转。
+
+东财个股资金流(em_fundflow)已于 2026-11-11 废弃：38 周 IC 预览显示其信息全被
+当日涨跌解释（残差 IC≈0），见 docs/quant/fundflow_ic_preview.md。
 """
 from __future__ import annotations
 
@@ -76,19 +76,6 @@ def fetch_baidu_valuation(code: str, since: str) -> pd.DataFrame:
     return out
 
 
-def fetch_em_fundflow(code: str, since: str) -> pd.DataFrame:
-    import akshare as ak
-
-    plain, market = code[2:], code[:2].lower()
-    df = ak.stock_individual_fund_flow(stock=plain, market=market)
-    df["datetime"] = pd.to_datetime(df["日期"])
-    out = df[["datetime", "主力净流入-净额", "主力净流入-净占比"]].copy()
-    out.columns = ["datetime", "main_net_inflow", "main_net_inflow_pct"]
-    out = out[out["datetime"] >= since]
-    out["instrument"] = code
-    return out
-
-
 def pit_available_date(period: pd.Timestamp) -> pd.Timestamp:
     """报告期 → 法定披露截止日（该日起视为全市场可见）。"""
     if period.month == 3:
@@ -135,7 +122,6 @@ def fetch_financials(code: str, since: str) -> pd.DataFrame:
 FETCHERS = {
     "sina_daily": fetch_sina_daily,
     "baidu_valuation": fetch_baidu_valuation,
-    "em_fundflow": fetch_em_fundflow,
     "financials": fetch_financials,
 }
 
@@ -202,7 +188,7 @@ def main() -> int:
     parser.add_argument("--since", default="2018-01-01")
     parser.add_argument("--limit", type=int, default=None, help="只拉前 N 只（试跑用）")
     parser.add_argument("--refresh", action="store_true",
-                        help="清掉断点全池重拉（em_fundflow/financials 周期性增量必加）")
+                        help="清掉断点全池重拉（financials 周期性增量必加）")
     args = parser.parse_args()
     return run(args.dataset, args.since, args.limit, args.refresh)
 

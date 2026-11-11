@@ -4,8 +4,8 @@
 假设**，最终以 ic_report 的实测 IC 为准；LightGBM 本身不依赖方向。
 
 数据字段来自 chenditc bin 包：$open/$high/$low/$close/$vwap 为后复权价，
-$volume/$amount 为量额。资金流因子因东财只有 ~120 天历史，v1 缺席（见
-akshare_fetcher.em_fundflow 的滚动累积说明），以 vwap_dev/intraday_pos 两个
+$volume/$amount 为量额。东财资金流因子已废弃（2026-11-11 IC 预览：信息全被
+当日涨跌解释，见 docs/quant/fundflow_ic_preview.md），以 vwap_dev/intraday_pos 两个
 量价代理近似"盘中资金行为"。
 """
 from __future__ import annotations
