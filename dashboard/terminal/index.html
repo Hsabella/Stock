@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101318">
+  <title>看盘台 · Stock</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top" aria-label="看盘台首页"><span class="brand-icon" aria-hidden="true"><i></i><i></i><i></i></span>看盘台</a>
+      <nav aria-label="页面导航"><a href="#top" class="active">总览</a><a href="#positions">持仓与信号</a><a href="#news">相关消息</a></nav>
+      <div class="top-controls"><span id="market-time">读取交易日…</span><button class="button refresh" id="refresh" type="button"><span aria-hidden="true">↻</span> 刷新行情</button></div>
+    </div>
+  </header>
+  <main id="top">
+    <div class="page-head">
+      <div><p class="eyebrow">A 股决策工作台</p><h1>今日看盘</h1></div>
+      <p class="feed" id="feed" role="status">正在读取本地数据…</p>
+    </div>
+    <div id="error" class="error-banner" role="alert" hidden></div>
+    <div id="terminal-content" hidden>
+      <section id="metrics" class="metrics" aria-label="市场与账户摘要"></section>
+      <section id="indices" class="indices" aria-label="指数盘中走势和结构灯"></section>
+      <div class="focus-grid">
+        <section class="panel chart-panel" aria-labelledby="chart-title">
+          <div class="panel-heading chart-heading">
+            <div><p class="eyebrow" id="chart-type">持仓日线</p><h2 id="chart-title">—</h2></div>
+            <div class="segmented" id="chart-range" aria-label="K 线区间"><button type="button" data-range="20" aria-pressed="false">20 日</button><button type="button" data-range="60" aria-pressed="true">60 日</button><button type="button" data-range="120" aria-pressed="false">120 日</button></div>
+          </div>
+          <div class="chart-quote" id="chart-quote"></div>
+          <div class="canvas-wrap" id="chart-wrap"><canvas id="candles" tabindex="0" role="img" aria-label="日 K 线和成交量，按方向键查看各日"></canvas><div class="tooltip" id="chart-tooltip" hidden></div><p class="empty chart-empty" id="chart-empty" hidden>本地没有可绘制的已收盘日 K 线。</p></div>
+          <div class="chart-bottom" id="chart-bottom"></div>
+        </section>
+        <section class="panel actions-panel" aria-labelledby="action-title">
+          <div class="panel-heading"><div><p class="eyebrow">执行顺序</p><h2 id="action-title">今天先做什么</h2></div><span id="risk-count" class="pill"></span></div>
+          <div id="actions" class="actions"></div>
+          <p class="panel-note">收盘破线沿用持仓纪律。盘中触线单独提醒，收盘后用更新的日 K 复核。</p>
+        </section>
+      </div>
+      <section id="positions" class="panel table-panel" aria-labelledby="table-title">
+        <div class="panel-heading table-heading"><div><p class="eyebrow">你的自选</p><h2 id="table-title">持仓与抄底灯</h2></div><div class="segmented" id="table-tabs" aria-label="列表类型"><button type="button" data-tab="holdings" aria-pressed="true">持仓</button><button type="button" data-tab="lamps" aria-pressed="false">抄底灯</button></div></div>
+        <div id="lamp-controls" class="lamp-controls" hidden><div class="segmented" id="lamp-filters" aria-label="筛选抄底灯"><button type="button" data-filter="today" aria-pressed="true">今日入场窗</button><button type="button" data-filter="structure" aria-pressed="false">结构较稳</button><button type="button" data-filter="all" aria-pressed="false">全部亮灯</button></div><label><span class="sr-only">搜索抄底灯</span><input id="lamp-search" type="search" placeholder="搜索股票名或代码" maxlength="30"></label></div>
+        <p class="table-caption" id="table-caption"></p>
+        <div class="table-scroll"><table><thead id="table-head"></thead><tbody id="table-body"></tbody></table></div>
+      </section>
+      <section id="news" class="panel news-panel" aria-labelledby="news-title">
+        <div class="panel-heading"><div><p class="eyebrow">影响范围</p><h2 id="news-title">持仓与板块消息</h2></div><button class="button" id="refresh-news" type="button">刷新本地消息</button></div>
+        <p class="table-caption" id="news-stamp"></p>
+        <div class="news-grid">
+          <div class="news-main"><div id="news-topics" class="topic-filters" aria-label="消息类别"></div><div id="news-list"></div></div>
+          <aside class="news-sidebar" aria-label="原文和社媒线索">
+            <div><h3>已核对来源</h3><div id="checked-news"></div></div>
+            <div><h3>X 线索</h3><div id="x-reference"></div>
+              <form id="x-form"><label for="x-link" class="sr-only">公开 X 帖子链接</label><input type="url" id="x-link" maxlength="300" placeholder="粘贴公开 X 帖子链接" required><button class="button" type="submit">读取</button></form><p class="panel-note">社媒摘要供核对原帖，交易信号仍来自本地系统。</p><div id="x-result" role="status"></div>
+            </div>
+          </aside>
+        </div>
+      </section>
+      <footer id="sources"></footer>
+    </div>
+  </main>
+</body>
+</html>
