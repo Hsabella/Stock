@@ -136,7 +136,9 @@ dmypy.json
 # OMC 私有目录
 .omc/
 
-# 实盘持仓状态（含成本价）
+# 实盘持仓配置、备份和状态（含成本价）
+/watchlist.yaml
+/watchlist.yaml.bak.*
 state/
 .venv-quant/
 mlruns/
